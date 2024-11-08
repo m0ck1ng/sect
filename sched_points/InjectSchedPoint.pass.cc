@@ -1,3 +1,5 @@
+#include <unordered_set>
+#include <stack>
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -21,6 +23,8 @@ static cl::opt<bool> ClDumpIRs(
 	"dump-ir",
 	cl::desc("Dump IRs before and after instrumenting callbacks (for debugging)"),
 	cl::init(false));
+
+STATISTIC(NumInstrumentedSchedPoints, "Number of instrumented scheduling points");
 
 struct MemInstr
 {
@@ -179,28 +183,29 @@ bool MemInstr::addrPointsToConstantData(Value *Addr)
 	return false;
 }
 
-int MemInstr::getMemoryAccessFuncIndex(Value *Addr, const DataLayout &DL)
-{
-	Type *OrigPtrTy = Addr->getType();
+// int MemInstr::getMemoryAccessFuncIndex(Value *Addr, const DataLayout &DL)
+// {
+// 	Type *OrigPtrTy = Addr->getType();
 
-	// Check if the pointer is opaque; if so, return -1 or handle appropriately.
-	if (!OrigPtrTy->isPointerTy() || cast<PointerType>(OrigPtrTy)->isOpaque())
-		// Handle the opaque pointer case (e.g., skip or return -1).
-		return -1;
+// 	// Check if the pointer is opaque; if so, return -1 or handle appropriately.
+// 	if (!OrigPtrTy->isPointerTy() || cast<PointerType>(OrigPtrTy)->isOpaque())
+// 		// Handle the opaque pointer case (e.g., skip or return -1).
+// 		dbgs() << "isOpaque\n";
+// 		return -1;
 
-	Type *OrigTy = cast<PointerType>(OrigPtrTy)->getNonOpaquePointerElementType();
+// 	Type *OrigTy = cast<PointerType>(OrigPtrTy)->getNonOpaquePointerElementType();
 
-	assert(OrigTy->isSized());
-	uint32_t TypeSize = DL.getTypeStoreSizeInBits(OrigTy);
-	if (TypeSize != 8 && TypeSize != 16 && TypeSize != 32 && TypeSize != 64)
-	{
-		// Ignore all unusual sizes.
-		return -1;
-	}
-	size_t Idx = countTrailingZeros(TypeSize / 8);
-	assert(Idx < kNumberOfAccessSizes);
-	return Idx;
-}
+// 	assert(OrigTy->isSized());
+// 	uint32_t TypeSize = DL.getTypeStoreSizeInBits(OrigTy);
+// 	if (TypeSize != 8 && TypeSize != 16 && TypeSize != 32 && TypeSize != 64)
+// 	{
+// 		// Ignore all unusual sizes.
+// 		return -1;
+// 	}
+// 	size_t Idx = countTrailingZeros(TypeSize / 8);
+// 	assert(Idx < kNumberOfAccessSizes);
+// 	return Idx;
+// }
 
 bool MemInstr::instrumentLoadOrStore(Instruction *I, const DataLayout &DL)
 {
@@ -213,35 +218,40 @@ bool MemInstr::instrumentLoadOrStore(Instruction *I, const DataLayout &DL)
 		IntegerType::getInt32Ty(Ctx),
 		false);
 
-	FunctionCallee Yield = M.getOrInsertFunction("yield", YieldTy);
+	FunctionCallee Yield = M.getOrInsertFunction("check_preempt_and_yield", YieldTy);
 
-	Function *PrintfF = dyn_cast<Function>(Yield.getCallee());
-	PrintfF->setDoesNotThrow();
+	Function *YieldF = dyn_cast<Function>(Yield.getCallee());
+	YieldF->setDoesNotThrow();
 
 	bool IsWrite = isa<StoreInst>(*I);
 	Value *Addr = IsWrite ? cast<StoreInst>(I)->getPointerOperand()
 						  : cast<LoadInst>(I)->getPointerOperand();
 
 	if (Addr->isSwiftError())
+	{
+		dbgs() << "isSwiftError\n";
 		return false;
-	int Idx = getMemoryAccessFuncIndex(Addr, DL);
-	if (Idx < 0)
-		return false;
+	}
+	// int Idx = getMemoryAccessFuncIndex(Addr, DL);
+	// if (Idx < 0){
+	// 	dbgs() << "idx < 0\n";
+	// 	return false;
+	// }
 
-	LLVM_DEBUG(dbgs() << " Injecting call to yield inside " << "\n");
+	// dbgs() << " Injecting call to yield inside " << I->getParent()->getName() << " function\n";
 
 	auto NI = I->getNextNonDebugInstruction();
 	IRBuilder<> Builder(NI);
 	auto CI = Builder.CreateCall(Yield);
 	CI->setDebugLoc(Loc);
 
+	NumInstrumentedSchedPoints++;
+
 	return true;
 }
 
 bool MemInstr::instrumentAll(Function &F, const TargetLibraryInfo &TLI)
 {
-	LLVM_DEBUG(dbgs() << "=== Instrumenting a function " << F.getName() << " ===\n");
-
 	if (F.getSection() == ".noinstr.text")
 		return false;
 
@@ -269,8 +279,16 @@ bool MemInstr::instrumentAll(Function &F, const TargetLibraryInfo &TLI)
 		chooseInstructionsToInstrument(LocalLoadsAndStores, AllLoadsAndStores, DL);
 	}
 
+	// LLVM_DEBUG(dbgs() << "=== Instrumenting a function " << F.getName() << " ===\n");
+
+	int NumInjected = 0;
 	for (auto Inst : AllLoadsAndStores)
+	{
 		Res |= instrumentLoadOrStore(Inst, DL);
+		NumInjected += Res;
+	}
+	dbgs() << "=== Instrumenting a function " << F.getName() << " ===\n";
+	dbgs() << "size of collected Load or Store inst: " << NumInjected << "\n";
 
 	return Res | HasCall;
 }
@@ -308,21 +326,38 @@ PreservedAnalyses InjectSchedPoint::run(Function &F,
 //-----------------------------------------------------------------------------
 // New PM Registration
 //-----------------------------------------------------------------------------
+
+// // Used for Opt
+// PassPluginLibraryInfo getPassPluginInfo()
+// {
+// 	return {LLVM_PLUGIN_API_VERSION, "inject-sched-point", LLVM_VERSION_STRING,
+// 			[](PassBuilder &PB)
+// 			{
+// 				PB.registerPipelineParsingCallback(
+// 					[](StringRef Name, FunctionPassManager &FPM,
+// 					   ArrayRef<PassBuilder::PipelineElement>)
+// 					{
+// 						if (Name == "inject-sched-point")
+// 						{
+// 							FPM.addPass(InjectSchedPoint());
+// 							return true;
+// 						}
+// 						return false;
+// 					});
+// 			}};
+// }
+
+// Used for clang pipeline
 PassPluginLibraryInfo getPassPluginInfo()
 {
 	return {LLVM_PLUGIN_API_VERSION, "inject-sched-point", LLVM_VERSION_STRING,
 			[](PassBuilder &PB)
 			{
-				PB.registerPipelineParsingCallback(
-					[](StringRef Name, FunctionPassManager &FPM,
-					   ArrayRef<PassBuilder::PipelineElement>)
+				PB.registerPipelineEarlySimplificationEPCallback(
+					[&](ModulePassManager &MPM, auto)
 					{
-						if (Name == "inject-sched-point")
-						{
-							FPM.addPass(InjectSchedPoint());
-							return true;
-						}
-						return false;
+						MPM.addPass(createModuleToFunctionPassAdaptor(InjectSchedPoint()));
+						return true;
 					});
 			}};
 }
