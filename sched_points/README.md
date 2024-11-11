@@ -1,6 +1,6 @@
 # Build Linux kernel into Bitcode
 
-## Modify Makefile
+## Make kernel patch
 
 Update additional build flags for kernel Makefile.
 ```bash
@@ -8,6 +8,17 @@ Update additional build flags for kernel Makefile.
 KBUILD_CFLAGS += -g
 # generate bitcode
 KBUILD_CFLAGS += -save-temps=obj
+```
+
+Patch the kernel file `kernel\schd\core.c`
+```C
+void check_preempt_and_yield(void) {
+    if (preempt_count() == 0 && current->policy ==  SCHED_EXT) {
+        printk(KERN_EMERG "Preemption is enabled; yielding.\n");
+        schedule();
+    }
+}
+EXPORT_SYMBOL(check_preempt_and_yield);
 ```
 
 ## Compile kernel with LLVM
