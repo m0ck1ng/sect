@@ -13,9 +13,12 @@ KBUILD_CFLAGS += -save-temps=obj
 Patch the kernel file `kernel\schd\core.c`
 ```C
 void check_preempt_and_yield(void) {
-    if (preempt_count() == 0 && current->policy ==  SCHED_EXT) {
-        printk(KERN_EMERG "Preemption is enabled; yielding.\n");
-        schedule();
+    if (current->policy == SCHED_EXT && 
+		get_current_state() == TASK_RUNNING && 
+		preemptible()) {
+        // printk(KERN_EMERG "Preemption is enabled; yielding.\n");
+		// DO NOT USE `schedule()` here as it may lead to dangeous sleep state.
+        yield();
     }
 }
 EXPORT_SYMBOL(check_preempt_and_yield);
