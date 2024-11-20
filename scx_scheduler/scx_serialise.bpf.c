@@ -480,7 +480,9 @@ void BPF_STRUCT_OPS(serialise_dispatch, s32 cpu, struct task_struct *p)
 	}
 	
 	bpf_spin_lock(&job->lock);
-	job->num_ready--;
+	// there are some unknow racy conditions that may lead `num_alive` to negative.
+	if (job->num_alive)
+		job->num_ready--;
 	job->is_first_round = false;
 	job->running = true;
 	bpf_spin_unlock(&job->lock);
@@ -582,16 +584,11 @@ void BPF_STRUCT_OPS(serialise_quiescent, struct task_struct *p, u64 deq_flags)
 		return;
 	}
 
-	bool timeout ;
-	bpf_spin_lock(&tctx->lock);
-	timeout = tctx->timeout;
-	bpf_spin_unlock(&tctx->lock);
-	__sync_fetch_and_add(&nr_timeout, timeout);
-
 	// // Update job's alive and ready counts
 	int num_alive, num_ready;
 	bpf_spin_lock(&job->lock);
-	job->num_alive--;
+	if (job->num_alive > 0)
+		job->num_alive--;
 	num_alive = job->num_alive;
 	num_ready = job->num_ready;
 	bpf_spin_unlock(&job->lock);
@@ -663,6 +660,7 @@ static u64 dispatch_timeout(struct bpf_map *map, pid_t *pid,
 		tctx->timeout = true;
 		bpf_spin_unlock(&tctx->lock);
 		enqueue_eid_for_dispatch(tctx->eid);
+		__sync_fetch_and_add(&nr_timeout, timeout);
 		bpf_printk("[dispatch_timeout] pid %d", *pid);
 	}
 	return 0;
