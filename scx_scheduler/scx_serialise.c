@@ -74,12 +74,15 @@ int main(int argc, char **argv)
 
 	SCX_OPS_LOAD(skel, serialise_ops, scx_serialise, uei);
 	link = SCX_OPS_ATTACH(skel, serialise_ops, scx_serialise);
+
+	if (!skel->data->timer_pinned)
+		printf("WARNING : BPF_F_TIMER_CPU_PIN not available, timer not pinned to central\n");
 	
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
-		printf("job   :%10" PRIu64 "    dispatch:%10" PRIu64 "   overlapped threads:%10" PRIu64 "\n",
-		       skel->bss->num_jobs,
-		       skel->bss->num_dispatch,
-		       skel->bss->num_overlap_thread);
+		printf("job   :%10" PRIu64 "    dispatch:%10" PRIu64 "   timeout:%10" PRIu64 "\n",
+		       skel->bss->nr_jobs,
+		       skel->bss->nr_dispatch,
+		       skel->bss->nr_timeout);
 		fflush(stdout);
 		sleep(1);
 	}
