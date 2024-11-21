@@ -17,10 +17,18 @@ UEI_DEFINE(uei);
 enum {
 	SCHED_EXT			= 7,
 	MAX_THREADS			= 200,
+
 	MS_TO_NS			= 1000LLU * 1000,
 	TIMER_INTERVAL_NS	= 50 * MS_TO_NS,
 	TIMEOUT_BUDGET		= 100 * MS_TO_NS,
 
+	THREAD_ENQUEUED 	= 1,
+	THREAD_RUNNING		= 2,
+
+	JOB_UNAVAILABLE		= 1,
+	JOB_READY           = 2,
+	JOB_RUNNING         = 3,
+	JOB_TIMEOUT			= 4,
 };
 
 /* Debugging macros */
@@ -53,8 +61,7 @@ struct sched_job {
 	int num_total;
 	int num_ready;
 	int num_alive;
-	bool is_first_round;
-	bool running;
+	u64 state;
 	struct bpf_spin_lock lock;
 };
 
@@ -88,8 +95,8 @@ struct {
 struct task_ctx {
 	u32 priority;
 	u32 eid; // id of executor
+	u64 state;
 	u64 last_enqueue_time;
-	bool enqueued;
 	bool timeout;
 	struct bpf_spin_lock lock;
 };
@@ -132,16 +139,24 @@ struct tctx_callback_ctx {
 	u32 eid;
 };
 
-static void enqueue_eid_for_dispatch(u32 eid) {
+static void enqueue_eid_for_dispatch(u32 eid, bool timeout) {
+	struct sched_job *job = bpf_map_lookup_elem(&sched_job_map, &eid);
+	if (!job)
+		return;
+	
+	bpf_spin_lock(&job->lock);
+	job->state = timeout ? JOB_TIMEOUT : JOB_RUNNING;
+	bpf_spin_unlock(&job->lock);
+
 	int status = bpf_map_push_elem(&group_dispatch_queue, &eid, BPF_EXIST);
 	if (status < 0)
-        bpf_printk("[enqueue_eid_for_dispatch] Failed to update group_dispatch_queue");
+        dbg("[enqueue_eid_for_dispatch] Failed to update group_dispatch_queue");
 }
 
 static s32 dequeue_eid_for_dispatch() {
 	u32 eid;
 	if (bpf_map_pop_elem(&group_dispatch_queue, &eid) < 0) {
-		// bpf_printk("[dequeue_eid_for_dispatch] Failed to dequeue group_dispatch_queue");
+		// dbg("[dequeue_eid_for_dispatch] Failed to dequeue group_dispatch_queue");
 		return -1;
 	}
 	return (s32)eid;
@@ -170,7 +185,7 @@ static u32 identify_group(const struct task_struct *p) {
 
 	status = bpf_probe_read_kernel(comm, sizeof(comm), p->comm);
 	if (status) {
-		bpf_printk("[identify_group] error reading p->comm");
+		dbg("[identify_group] error reading p->comm");
 		return 0;
 	}
 
@@ -183,7 +198,7 @@ static u32 identify_group(const struct task_struct *p) {
 static void update_priority(pid_t pid, s32 priority) {
 	struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
 	if (!tctx) {
-		bpf_printk("[update_priority] task context not found");
+		dbg("[update_priority] task context not found");
 		return;
 	}
 
@@ -202,14 +217,13 @@ static struct sched_job* get_or_create_sched_job(u32 eid) {
 			.num_total = num_sched_thread,
             .num_alive = 0,
             .num_ready = 0,
-            .is_first_round = true,
-			.running = false,
+			.state = JOB_UNAVAILABLE,
             .lock = {},
         };
         bpf_map_update_elem(&sched_job_map, &eid, &new_job, BPF_NOEXIST);
         job = bpf_map_lookup_elem(&sched_job_map, &eid);
         if (!job) {
-            bpf_printk("[handle_sched_ext] Failed to retrieve sched job for eid: %d", eid);
+            dbg("[handle_sched_ext] Failed to retrieve sched job for eid: %d", eid);
             return NULL;
         }
     }
@@ -226,97 +240,65 @@ static u64 update_last_enqueue_time(struct bpf_map *map, pid_t *pid,
 				  struct time_callback_ctx *tcallbackctx)
 {
 	bpf_spin_lock(&tctx->lock);
-	if (tctx->enqueued && !tctx->timeout && (tcallbackctx->eid == tctx->eid)) 
+	if (tctx->state == THREAD_ENQUEUED && !tctx->timeout && (tcallbackctx->eid == tctx->eid)) 
 		tctx->last_enqueue_time = tcallbackctx->now;
 	bpf_spin_unlock(&tctx->lock);
 	return 0;
 }
 
-/* 
- * This function handles tasks flagged with SCHED_EXT to trigger concurrency issues.
- * 
- * - First, it checks for new scheduling requests from the user space via a ring buffer. If new requests 
- *   are found, it add the request to `sched_job_map` and initializes the scheduling algorithm.
- * 
- * - It then looks up the task's executor ID (`eid`) and updates the scheduling job status for 
- *   that executor in the `sched_job_map`. The tasks to be scheduled then follows asynchronously
- *   and the function should be invoked repeatedly. Suppose the following tasks are desired.
- * 
- * - If the task is newly created and not yet in the `task_ctx_map`, it creates a new task context 
- *   and adds it to the map. Keep waiting for other tasks in from the same executor.
- * 
- * - Finally, if all tasks for the given executor are ready, it updates task priorities and enqueues 
- *   the `eid` for dispatch in the `group_dispatch_queue`.
- */
 static void handle_sched_ext(struct task_struct *p)
 {
     pid_t pid = p->pid;
-    bpf_printk("[handle_sched_ext] pid: %d", pid);
+    dbg("[handle_sched_ext] pid: %d", pid);
     u32 eid = identify_group(p);
 
 	// Retrieve or create scheduling job
-    struct sched_job *job = get_or_create_sched_job(eid);
-    if (!job)
+    struct sched_job *job = bpf_map_lookup_elem(&sched_job_map, &eid);
+    if (!job || job->state == JOB_TIMEOUT) {
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
         return;
+	}
 
-    // Retrieve or create task context
     struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
-    if (!tctx) {
-		bpf_spin_lock(&job->lock);
-		bool running = job->running;
-		bpf_spin_unlock(&job->lock);
-		// unexpected thread
-		if (running) {
-			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
-			bpf_printk("[handle_sched_ext] thread delayed", eid);
-			return;
-		}
-        // Create a new task context
-        struct task_ctx new_ctx = {
-            .priority = 1,
-            .eid = eid,
-            .enqueued = false,
-			.timeout = false,
-            .lock = {},
-        };
-        bpf_map_update_elem(&task_ctx_map, &pid, &new_ctx, BPF_NOEXIST);
-        tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
-        if (!tctx) {
-            bpf_printk("[handle_sched_ext] Failed to retrieve task context for pid: %d", pid);
-            return;
-        }
-    }
+	if (!tctx) {
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		return;
+	}
 
     bpf_spin_lock(&tctx->lock);
-    tctx->enqueued = true;
+    tctx->state = THREAD_ENQUEUED;
     bpf_spin_unlock(&tctx->lock);
+
+	// Update timestamp
 	struct time_callback_ctx tcallbackctx = {
 		.eid = eid,
 		.now = bpf_ktime_get_ns()
 	};
 	bpf_for_each_map_elem(&task_ctx_map, update_last_enqueue_time, &tcallbackctx, 0);
 
-    bool all_tasks_ready = false;
-
-    // Lock the job to update its state
+	bool all_tasks_ready = false;
+	int num_ready, num_alive, num_total;
+	u64 state;
     bpf_spin_lock(&job->lock);
-
-    if (job->is_first_round)
-        job->num_alive++;
-
     job->num_ready++;
-    if (job->is_first_round)
-        all_tasks_ready = (job->num_ready == job->num_total);
-    else
-        all_tasks_ready = (job->num_ready == job->num_alive);
+	if (job->state == JOB_READY || job->state == JOB_UNAVAILABLE)
+		all_tasks_ready = job->num_ready == job->num_total;
+	else if (job->state == JOB_RUNNING)
+		all_tasks_ready = job->num_ready == job->num_alive;
 
+	num_ready = job->num_ready;
+	num_alive = job->num_alive;
+	num_total = job->num_total;
+	state = job->state;
     bpf_spin_unlock(&job->lock);
+
+	dbg("[handle_sched_ext] state: %d, num_alive: %d, num_ready: %d, num total: %d", state, num_alive, num_ready, num_total);
 
     // If all tasks are ready, proceed to update priorities and enqueue for dispatch
     if (all_tasks_ready) {
         update_priorities(pid, eid);
-        bpf_printk("[handle_sched_ext] enqueueing eid: %d for dispatch", eid);
-        enqueue_eid_for_dispatch(eid);
+        dbg("[handle_sched_ext] enqueueing eid: %d for dispatch", eid);
+        enqueue_eid_for_dispatch(eid, false);
     }
 }
 
@@ -356,7 +338,7 @@ void BPF_STRUCT_OPS(serialise_dequeue, struct task_struct *p, u64 deq_flags)
 	if (!is_sched_ext(p))
 		return;
 	
-	bpf_printk("[dequeue] pid: %d, flag: %d", p->pid, deq_flags);
+	dbg("[dequeue] pid: %d, flag: %d", p->pid, deq_flags);
 }
 
 /*
@@ -368,7 +350,7 @@ static u64 get_highest_priority(struct bpf_map *map, pid_t *pid,
 				  struct tctx_callback_ctx *tcallbackctx)
 {
 	bpf_spin_lock(&tctx->lock);
-	if (tctx->eid != tcallbackctx->eid) {
+	if (tctx->eid != tcallbackctx->eid | tctx->state == THREAD_RUNNING) {
 		bpf_spin_unlock(&tctx->lock);
 		return 0;
 	}
@@ -400,39 +382,35 @@ static u64 get_highest_priority(struct bpf_map *map, pid_t *pid,
 static void
 dispatch_highest_priority_thread(struct tctx_callback_ctx *tcallbackctx)
 {
-	pid_t dispatched_pid = -1;
+	struct task_struct *highest_prio_p;
+	pid_t dispatched_pid = tcallbackctx->highest_priority_pid;
 
-	if (tcallbackctx->highest_priority_pid != -1) {
-		struct task_struct *highest_prio_p;
-		dispatched_pid = tcallbackctx->highest_priority_pid;
-
-		/* Get reference to highest priority task */
-		highest_prio_p = bpf_task_from_pid(dispatched_pid);
-		if (!highest_prio_p) {
-			bpf_printk("[dispatch] failed to get task_struct from pid: %d",
-			     dispatched_pid);
-			return;
-		}
-
-		/* Update the task context map */
-		struct task_ctx* tctx = bpf_map_lookup_elem(&task_ctx_map, &dispatched_pid);
-		if (tctx) {
-			bpf_spin_lock(&tctx->lock);
-			tctx->enqueued = false;
-			tctx->timeout = false;
-			bpf_spin_unlock(&tctx->lock);
-		}
-
-		// dbg("[dispatch] dispatching pid: %d, with priority: %d\n",
-		    // dispatched_pid, tcallbackctx->highest_priority);
-
-		/* Dispatch the task */
-		scx_bpf_dispatch(highest_prio_p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL,
-				 0);
-
-		/* Clean up and release reference to the task */
-		bpf_task_release(highest_prio_p);
+	/* Get reference to highest priority task */
+	highest_prio_p = bpf_task_from_pid(dispatched_pid);
+	if (!highest_prio_p) {
+		dbg("[dispatch] failed to get task_struct from pid: %d",
+				dispatched_pid);
+		return;
 	}
+
+	/* Update the task context map */
+	struct task_ctx* tctx = bpf_map_lookup_elem(&task_ctx_map, &dispatched_pid);
+	if (tctx) {
+		bpf_spin_lock(&tctx->lock);
+		tctx->state = THREAD_RUNNING;
+		// tctx->timeout = false;
+		bpf_spin_unlock(&tctx->lock);
+	}
+
+	// dbg("[dispatch] dispatching pid: %d, with priority: %d\n",
+		// dispatched_pid, tcallbackctx->highest_priority);
+
+	/* Dispatch the task */
+	scx_bpf_dispatch(highest_prio_p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL,
+				0);
+
+	/* Clean up and release reference to the task */
+	bpf_task_release(highest_prio_p);
 }
 
 /*
@@ -444,7 +422,7 @@ dispatch_highest_priority_thread(struct tctx_callback_ctx *tcallbackctx)
  * 
  * - It then iterates over all tasks in the `task_ctx_map` using `bpf_for_each_map_elem()` and 
  *   calls the `get_highest_priority` function to find the task with the highest priority within 
- *   the specified `eid` group. If iteration fails, a bpf_printking is logged.
+ *   the specified `eid` group. If iteration fails, a dbging is logged.
  * 
  * - Once the highest priority task is found, `dispatch_highest_priority_thread()` is called to 
  *   dispatch that task for execution on the specified CPU.
@@ -462,29 +440,27 @@ void BPF_STRUCT_OPS(serialise_dispatch, s32 cpu, struct task_struct *p)
 	};
 
 	if (bpf_for_each_map_elem(&task_ctx_map, get_highest_priority, &tcallbackctx, 0) == -EINVAL) {
-		bpf_printk("[dispatch] failed to iterate over task_ctx_map");
+		dbg("[dispatch] failed to iterate over task_ctx_map");
 		return;
 	}
 
 	if (tcallbackctx.highest_priority_pid == -1)
 		return;
 
-	bpf_printk("[dispatch] highest pid: %d", tcallbackctx.highest_priority_pid);
+	dbg("[dispatch] highest pid: %d", tcallbackctx.highest_priority_pid);
 
 	dispatch_highest_priority_thread(&tcallbackctx);
 
 	struct sched_job *job = bpf_map_lookup_elem(&sched_job_map, &eid);
 	if (!job) {
-		bpf_printk("[dispatch] job not found");
+		dbg("[dispatch] job not found");
 		return;
 	}
 	
 	bpf_spin_lock(&job->lock);
 	// there are some unknow racy conditions that may lead `num_alive` to negative.
-	if (job->num_alive)
+	if (job->num_ready)
 		job->num_ready--;
-	job->is_first_round = false;
-	job->running = true;
 	bpf_spin_unlock(&job->lock);
 	
 	__sync_fetch_and_add(&nr_dispatch, 1);
@@ -495,7 +471,7 @@ void BPF_STRUCT_OPS(serialise_runnable, struct task_struct *p, u64 enq_flags)
 	if (!is_sched_ext(p))
 		return;
 
-	bpf_printk("[runnable] pid: %d", p->pid);
+	dbg("[runnable] pid: %d", p->pid);
 }
 
 void BPF_STRUCT_OPS(serialise_running, struct task_struct *p)
@@ -503,7 +479,7 @@ void BPF_STRUCT_OPS(serialise_running, struct task_struct *p)
 	if (!is_sched_ext(p))
 		return;
 
-	bpf_printk("[running] pid: %d", p->pid);
+	dbg("[running] pid: %d", p->pid);
 }
 
 void BPF_STRUCT_OPS(serialise_stopping, struct task_struct *p, bool runnable)
@@ -511,30 +487,35 @@ void BPF_STRUCT_OPS(serialise_stopping, struct task_struct *p, bool runnable)
 	if (!is_sched_ext(p))
 		return;
 
-	bpf_printk("[stopping] pid: %d", p->pid);
+	dbg("[stopping] pid: %d", p->pid);
 }
 
-static void handle_direct_exit(struct sched_job *job, u32 eid)
+static void handle_sleep(struct task_struct *p)
 {
-	int num_alive, num_ready, num_total;
+	pid_t pid = p->pid;
+	u32 eid = identify_group(p);
+	struct sched_job *job = bpf_map_lookup_elem(&sched_job_map, &eid);
+	if (!job) 
+		return;
 
+	struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+	if (!tctx)
+		return;
+
+	int num_alive, num_ready, num_total;
+	u64 state;
 	bpf_spin_lock(&job->lock);
-	job->num_total--;
+	state = job->state;
+	num_total = job->num_total;
 	num_alive = job->num_alive;
 	num_ready = job->num_ready;
-	num_total = job->num_total;
 	bpf_spin_unlock(&job->lock);
 
-	if (!num_total) {
-		bpf_spin_lock(&job->lock);
-		job->num_total = num_sched_thread;
-		job->running = false;
-		bpf_spin_unlock(&job->lock);
-	}
+	dbg("[handle_sleep] num_alive: %d, num_ready: %d, num total: %d", num_alive, num_ready, num_total);
 
-	if (num_alive && num_alive == num_ready) {
-		bpf_printk("[exit_task] enqueue_eid_for_dispatch");
-		enqueue_eid_for_dispatch(eid);
+	if (num_alive && state == JOB_RUNNING) {
+		dbg("[handle_sleep] enqueue_eid_for_dispatch");
+		enqueue_eid_for_dispatch(eid, false);
 	}
 }
 
@@ -544,9 +525,53 @@ static void reset_job_state(struct sched_job *job)
 	job->num_total = num_sched_thread;
 	job->num_alive = 0;
 	job->num_ready = 0;
-	job->is_first_round = true;
-	job->running = false;
+	job->state = JOB_UNAVAILABLE;
 	bpf_spin_unlock(&job->lock);
+}
+
+static void handle_exit(struct task_struct *p)
+{
+	pid_t pid = p->pid;
+	u32 eid = identify_group(p);
+	struct sched_job *job = bpf_map_lookup_elem(&sched_job_map, &eid);
+	if (!job) 
+		return;
+
+	struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+	if (!tctx)
+		return;
+
+	int num_alive, num_ready, num_total;
+	u64 state;
+	bpf_spin_lock(&job->lock);
+	state = job->state;
+	if (state == JOB_READY || state == JOB_UNAVAILABLE)
+		job->num_total--;
+	job->num_alive--;
+	num_total = job->num_total;
+	num_alive = job->num_alive;
+	num_ready = job->num_ready;
+	bpf_spin_unlock(&job->lock);
+
+	dbg("[handle_exit] num_alive: %d, num_ready: %d, num total: %d", num_alive, num_ready, num_total);
+
+	// Delete task context
+	if (bpf_map_delete_elem(&task_ctx_map, &pid) < 0)
+		dbg("[handle_exit] failed to delete task context");
+
+	// Enqueue for dispatch if conditions are met
+	if (num_alive && num_alive == num_ready) {
+		dbg("[handle_exit] enqueue_eid_for_dispatch");
+		enqueue_eid_for_dispatch(eid, false);
+	}
+
+	// Handle job reset if no alive tasks remain
+	if (!num_total || (!num_alive && state !=JOB_UNAVAILABLE)) {
+		reset_job_state(job);
+		__sync_fetch_and_add(&nr_jobs, 1);
+		if (state == JOB_TIMEOUT)
+			__sync_fetch_and_add(&nr_timeout, 1);
+	}
 }
 
 /*
@@ -563,53 +588,20 @@ void BPF_STRUCT_OPS(serialise_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!is_sched_ext(p))
 		return;
 
-	pid_t pid = p->pid;
-	dbg("[quiescent] pid: %d, deq_flags: %d", pid, deq_flags);
+	dbg("[quiescent] pid: %d, deq_flags: %d", p->pid, deq_flags);
 
-	if (deq_flags != 25)
-		return;
-
-	u32 eid = identify_group(p);
-	struct sched_job *job = bpf_map_lookup_elem(&sched_job_map, &eid);
-	if (!job) {
-		bpf_printk("[quiescent] failed to retrieve sched job");
-		return;
+	switch (deq_flags)
+	{
+	case 25:
+		handle_exit(p);
+		break;
+	case 9:	
+		handle_sleep(p);
+		break;
+	default:
+		break;
 	}
-
-	// Check if task context exists
-	struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
-	if (!tctx) {
-		bpf_printk("[quiescent] task exits directly");
-		handle_direct_exit(job, eid);
-		return;
-	}
-
-	// // Update job's alive and ready counts
-	int num_alive, num_ready;
-	bpf_spin_lock(&job->lock);
-	if (job->num_alive > 0)
-		job->num_alive--;
-	num_alive = job->num_alive;
-	num_ready = job->num_ready;
-	bpf_spin_unlock(&job->lock);
-
-	bpf_printk("[quiescent] num_alive: %d, num_ready: %d", num_alive, num_ready);
-
-	// Delete task context
-	if (bpf_map_delete_elem(&task_ctx_map, &pid) < 0)
-		bpf_printk("[quiescent] failed to delete task context");
-
-	// Enqueue for dispatch if conditions are met
-	if (num_alive && num_alive == num_ready) {
-		bpf_printk("[quiescent] enqueue_eid_for_dispatch");
-		enqueue_eid_for_dispatch(eid);
-	}
-
-	// Handle job reset if no alive tasks remain
-	if (!num_alive) {
-		reset_job_state(job);
-		__sync_fetch_and_add(&nr_jobs, 1);
-	}
+	return;
 }
 
 /*
@@ -621,9 +613,56 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 	if (!is_sched_ext(from))
 		return true;
 
-	// /* Set slice to 0 so that dispatch() will be called when its timeslot is up */
+	u32 eid = identify_group(from);
+    struct sched_job *job = get_or_create_sched_job(eid);
+    if (!job)
+		return true;
+
+	u64 state;
+	int num_alive;
+	bpf_spin_lock(&job->lock);
+	state = job->state;
+	num_alive = job->num_alive;
+	bpf_spin_unlock(&job->lock);
+
+	if (state == JOB_RUNNING && num_alive == 1)
+		return false;
+
+	/* Set slice to 0 so that dispatch() will be called when its timeslot is up */
 	from->scx.slice = 0;
-	// dbg("[yield] from: %d", from->pid);
+	pid_t pid = from->pid;
+
+    struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+	if (tctx)
+		return true;
+
+	if (state != JOB_UNAVAILABLE) {
+		dbg("[yield] pid %d come late, job %d is running", pid, eid);
+		return true;
+	}
+
+	dbg("[yield] from: %d", from->pid);
+
+	// Create a new task context
+	struct task_ctx new_ctx = {
+		.priority = 1,
+		.eid = eid,
+		.state = THREAD_RUNNING,
+		.timeout = false,
+		.lock = {},
+	};
+	bpf_map_update_elem(&task_ctx_map, &pid, &new_ctx, BPF_NOEXIST);
+	tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+	if (!tctx) {
+		dbg("[yield] Failed to insert task context for pid: %d", pid);
+		return true;
+	}
+
+	bpf_spin_lock(&job->lock);
+	job->num_alive++;
+	if (job->num_alive == job->num_total)
+		job->state = JOB_READY;
+	bpf_spin_unlock(&job->lock);
 
 	return true;
 }
@@ -638,7 +677,7 @@ void BPF_STRUCT_OPS(serialise_exit_task, struct task_struct *p,
 		return;
 
 	pid_t pid = p->pid;
-	bpf_printk("[exit_task] pid: %d", pid);
+	dbg("[exit_task] pid: %d", pid);
 }
 
 static bool vtime_before(u64 a, u64 b)
@@ -651,17 +690,16 @@ static u64 dispatch_timeout(struct bpf_map *map, pid_t *pid,
 				  u64 *now)
 {
 	bpf_spin_lock(&tctx->lock);
-	bool enqueued = tctx->enqueued;
+	u64 state = tctx->state;
 	bool timeout = tctx->timeout;
 	u64 expire_at = tctx->last_enqueue_time+TIMEOUT_BUDGET;
 	bpf_spin_unlock(&tctx->lock);
-	if (enqueued && !timeout && vtime_before(expire_at, *now)) {
+	if (state == THREAD_ENQUEUED && !timeout && vtime_before(expire_at, *now)) {
 		bpf_spin_lock(&tctx->lock);
 		tctx->timeout = true;
 		bpf_spin_unlock(&tctx->lock);
-		enqueue_eid_for_dispatch(tctx->eid);
-		__sync_fetch_and_add(&nr_timeout, timeout);
-		bpf_printk("[dispatch_timeout] pid %d", *pid);
+		enqueue_eid_for_dispatch(tctx->eid, true);
+		dbg("[dispatch_timeout] pid %d", *pid);
 	}
 	return 0;
 }
