@@ -19,11 +19,12 @@ enum {
 	MAX_THREADS			= 200,
 
 	MS_TO_NS			= 1000LLU * 1000,
-	TIMER_INTERVAL_NS	= 50 * MS_TO_NS,
-	TIMEOUT_BUDGET		= 100 * MS_TO_NS,
+	TIMER_INTERVAL_NS	= 30 * MS_TO_NS,
+	TIMEOUT_BUDGET		= 60 * MS_TO_NS,
 
 	THREAD_ENQUEUED 	= 1,
 	THREAD_RUNNING		= 2,
+	THREAD_TIMEOUT		= 3,
 
 	JOB_UNAVAILABLE		= 1,
 	JOB_READY           = 2,
@@ -32,7 +33,7 @@ enum {
 };
 
 /* Debugging macros */
-const volatile u32 debug = 1;
+const volatile u32 debug = 0;
 /* Scheduling algorithm macros */
 const volatile int use_pct = 0;
 const volatile int use_random_priority_walk = 0;
@@ -97,7 +98,6 @@ struct task_ctx {
 	u32 eid; // id of executor
 	u64 state;
 	u64 last_enqueue_time;
-	bool timeout;
 	struct bpf_spin_lock lock;
 };
 
@@ -240,7 +240,7 @@ static u64 update_last_enqueue_time(struct bpf_map *map, pid_t *pid,
 				  struct time_callback_ctx *tcallbackctx)
 {
 	bpf_spin_lock(&tctx->lock);
-	if (tctx->state == THREAD_ENQUEUED && !tctx->timeout && (tcallbackctx->eid == tctx->eid)) 
+	if (tctx->state == THREAD_ENQUEUED && (tcallbackctx->eid == tctx->eid)) 
 		tctx->last_enqueue_time = tcallbackctx->now;
 	bpf_spin_unlock(&tctx->lock);
 	return 0;
@@ -360,7 +360,7 @@ static u64 get_highest_priority(struct bpf_map *map, pid_t *pid,
 	* first in the map will be dispatched first. Random Walk may
 	* have this issue, but PCT should not have this issue.
 	*/
-	if (tctx->timeout) {
+	if (tctx->state == THREAD_TIMEOUT) {
 		tcallbackctx->highest_priority_pid = *pid;
 		bpf_spin_unlock(&tctx->lock);
 		return 1;
@@ -398,7 +398,6 @@ dispatch_highest_priority_thread(struct tctx_callback_ctx *tcallbackctx)
 	if (tctx) {
 		bpf_spin_lock(&tctx->lock);
 		tctx->state = THREAD_RUNNING;
-		// tctx->timeout = false;
 		bpf_spin_unlock(&tctx->lock);
 	}
 
@@ -513,7 +512,7 @@ static void handle_sleep(struct task_struct *p)
 
 	dbg("[handle_sleep] num_alive: %d, num_ready: %d, num total: %d", num_alive, num_ready, num_total);
 
-	if (num_alive && state == JOB_RUNNING) {
+	if (num_ready && state == JOB_RUNNING) {
 		dbg("[handle_sleep] enqueue_eid_for_dispatch");
 		enqueue_eid_for_dispatch(eid, false);
 	}
@@ -648,7 +647,6 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 		.priority = 1,
 		.eid = eid,
 		.state = THREAD_RUNNING,
-		.timeout = false,
 		.lock = {},
 	};
 	bpf_map_update_elem(&task_ctx_map, &pid, &new_ctx, BPF_NOEXIST);
@@ -691,12 +689,11 @@ static u64 dispatch_timeout(struct bpf_map *map, pid_t *pid,
 {
 	bpf_spin_lock(&tctx->lock);
 	u64 state = tctx->state;
-	bool timeout = tctx->timeout;
 	u64 expire_at = tctx->last_enqueue_time+TIMEOUT_BUDGET;
 	bpf_spin_unlock(&tctx->lock);
-	if (state == THREAD_ENQUEUED && !timeout && vtime_before(expire_at, *now)) {
+	if (state == THREAD_ENQUEUED && vtime_before(expire_at, *now)) {
 		bpf_spin_lock(&tctx->lock);
-		tctx->timeout = true;
+		tctx->state = THREAD_TIMEOUT;
 		bpf_spin_unlock(&tctx->lock);
 		enqueue_eid_for_dispatch(tctx->eid, true);
 		dbg("[dispatch_timeout] pid %d", *pid);

@@ -14,9 +14,13 @@ Patch the kernel file `kernel\schd\core.c`
 ```C
 void check_preempt_and_yield(void) {
     if (current->policy == SCHED_EXT && 
-		get_current_state() == TASK_RUNNING && 
+		get_current_state() == TASK_RUNNING &&
+		 !current->non_block_count &&
+		!is_idle_task(current) &&
+		!current->non_block_count &&
 		preempt_count() == 0 &&
-		!irqs_disabled()) {
+		!irqs_disabled() &&
+		(rcu_preempt_depth() << MIGHT_RESCHED_RCU_SHIFT) == 0 ) {
         // printk(KERN_EMERG "Preemption is enabled; yielding.\n");
 		// DO NOT USE `schedule()` here as it may lead to dangeous sleep state.
         yield();
