@@ -3,7 +3,7 @@
 ## Make kernel patch
 
 Update additional build flags for kernel Makefile.
-```bash
+```Makefile
 # add debug info
 KBUILD_CFLAGS += -g
 # generate bitcode
@@ -30,8 +30,10 @@ EXPORT_SYMBOL(check_preempt_and_yield);
 ```
 
 ## Compile kernel with LLVM
-```
+```bash
 make CC=clang defconfig
+# customize kernel config here
+make CC=clang olddefconfig
 make CC=clang \
     LD=ld.lld \
     AR=llvm-ar \
@@ -76,5 +78,10 @@ clang -Xclang -load -Xclang "/home/pass/Meminstr/build/libInjectSchedPoint.so"
 
 This is the latest style for invoking passes.
 ```bash
-clang -fpass-plugin=./Hello/build/libHelloPass.so 
+clang -fpass-plugin=/home/pass/Meminstr/build/libInjectSchedPoint.so
+```
+
+Patch the makefile of targeted modules (drivers, net, io_uring, fs, ipc).
+```Makefile
+KBUILD_CFLAGS += -fpass-plugin=/home/pass/Meminstr/build/libInjectSchedPoint.so
 ```
