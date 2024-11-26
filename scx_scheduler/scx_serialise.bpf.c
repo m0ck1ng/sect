@@ -36,6 +36,7 @@ enum {
 const volatile u32 debug = 1;
 /* Scheduling algorithm macros */
 const volatile int use_pct = 1;
+const volatile int use_pos = 0;
 const volatile int use_random_priority_walk = 0;
 const volatile int use_random_walk = 0;
 const volatile int num_sched_thread = 2;
@@ -99,6 +100,8 @@ struct {
 struct task_ctx {
 	u32 priority;
 	u32 eid; // id of executor
+	u64 next_event_addrs;
+	bool is_write;
 	u64 state;
 	u64 last_enqueue_time;
 	struct bpf_spin_lock lock;
@@ -675,6 +678,8 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 	struct task_ctx new_ctx = {
 		.priority = 1,
 		.eid = eid,
+		.is_write = false,
+		.next_event_addrs = 0,
 		.state = THREAD_RUNNING,
 		.lock = {},
 	};

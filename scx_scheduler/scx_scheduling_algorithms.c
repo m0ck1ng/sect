@@ -11,6 +11,7 @@ u32 iterations, initial_max_num_events, task_count, max_num_events,
 	num_events;
 
 #include "pct.c"
+#include "pos.c"
 #include "random-walk.c"
 #include "random-priority.c"
 
@@ -21,6 +22,8 @@ s32 update_priorities(pid_t pid, u32 eid, bool initial_run) {
 		update_priorities_rp(pid);
 	} else if (use_pct) {
 		update_priorities_pct(pid);
+	} else if (use_pos) {
+		update_priorities_pos(eid, pid);
 	} else {
 		return -1;
 	}
@@ -35,6 +38,8 @@ int init_scheduling_algo(u32 eid) {
 		return init_rp();
 	} else if (use_pct) {
 		return init_pct(eid);
+	} else if (use_pos) {
+		return init_pos();
 	} else {
 		return -1;
 	}
