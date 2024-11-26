@@ -62,6 +62,9 @@ struct sched_job {
 	int num_total;
 	int num_ready;
 	int num_alive;
+	u32 num_expected_events;
+	u32 num_events;
+	bool initialized_sched_algo;
 	u64 state;
 	struct bpf_spin_lock lock;
 };
@@ -214,10 +217,13 @@ static struct sched_job* get_or_create_sched_job(u32 eid) {
     if (!job) {
         // Create a new scheduling job
         struct sched_job new_job = {
-			.num_total = num_sched_thread,
+						.num_total = num_sched_thread,
             .num_alive = 0,
             .num_ready = 0,
-			.state = JOB_UNAVAILABLE,
+            .num_events = 0,
+            .num_expected_events = 0,
+            .initialized_sched_algo = false,
+						.state = JOB_UNAVAILABLE,
             .lock = {},
         };
         bpf_map_update_elem(&sched_job_map, &eid, &new_job, BPF_NOEXIST);
@@ -260,6 +266,12 @@ static void handle_sched_ext(struct task_struct *p)
 	}
 
     struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+
+    // If we haven't already, initialize the scheduling algorithm
+    if (!job->initialized_sched_algo && job->num_expected_events != 0) {
+			init_scheduling_algo(eid);
+		}
+
 	if (!tctx) {
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		return;
@@ -281,6 +293,7 @@ static void handle_sched_ext(struct task_struct *p)
 	u64 state;
     bpf_spin_lock(&job->lock);
     job->num_ready++;
+    job->num_events += 1;
 	if (job->state == JOB_READY || job->state == JOB_UNAVAILABLE)
 		all_tasks_ready = job->num_ready == job->num_total;
 	else if (job->state == JOB_RUNNING)
@@ -296,7 +309,7 @@ static void handle_sched_ext(struct task_struct *p)
 
     // If all tasks are ready, proceed to update priorities and enqueue for dispatch
     if (all_tasks_ready) {
-        update_priorities(pid, eid);
+        update_priorities(pid, eid, !job->initialized_sched_algo);
         dbg("[handle_sched_ext] enqueueing eid: %d for dispatch", eid);
         enqueue_eid_for_dispatch(eid, false);
     }
@@ -520,12 +533,22 @@ static void handle_sleep(struct task_struct *p)
 
 static void reset_job_state(struct sched_job *job)
 {
+	int num_events = 0;
 	bpf_spin_lock(&job->lock);
 	job->num_total = num_sched_thread;
 	job->num_alive = 0;
 	job->num_ready = 0;
+
+	if (job->num_expected_events == 0) {
+		job->num_expected_events = job->num_events;
+	}
+
+	job->num_events = 0;
+	job->initialized_sched_algo = false;
+
 	job->state = JOB_UNAVAILABLE;
 	bpf_spin_unlock(&job->lock);
+	dbg("[reset_job_state] finished job with %d events", num_events);
 }
 
 static void handle_exit(struct task_struct *p)
