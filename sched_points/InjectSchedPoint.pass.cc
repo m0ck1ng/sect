@@ -216,6 +216,8 @@ bool MemInstr::instrumentLoadOrStore(Instruction *I, const DataLayout &DL)
 	// STEP 1: Inject the declaration of printf
 	FunctionType *YieldTy = FunctionType::get(
 		IntegerType::getInt32Ty(Ctx),
+		{PointerType::getUnqual(IntegerType::getInt8Ty(Ctx)), // Parameter `void*addr`
+		IntegerType::getInt1Ty(Ctx)},						  // Parameter `bool isWrite`
 		false);
 
 	FunctionCallee Yield = M.getOrInsertFunction("check_preempt_and_yield", YieldTy);
@@ -240,9 +242,13 @@ bool MemInstr::instrumentLoadOrStore(Instruction *I, const DataLayout &DL)
 
 	// dbgs() << " Injecting call to yield inside " << I->getParent()->getName() << " function\n";
 
-	auto NI = I->getNextNonDebugInstruction();
-	IRBuilder<> Builder(NI);
-	auto CI = Builder.CreateCall(Yield);
+	ConstantInt *IsWriteVal = ConstantInt::get(IntegerType::getInt1Ty(Ctx), IsWrite);
+
+	// auto NI = I->getNextNonDebugInstruction();
+	// IRBuilder<> Builder(NI);
+	IRBuilder<> Builder(I);
+	Value *AddrPtr = Builder.CreatePointerCast(Addr, IRBuilder<>(Ctx).getInt8PtrTy());
+	auto CI = Builder.CreateCall(Yield, {AddrPtr, IsWriteVal});
 	CI->setDebugLoc(Loc);
 
 	NumInstrumentedSchedPoints++;
