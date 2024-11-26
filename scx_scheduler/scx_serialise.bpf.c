@@ -33,11 +33,11 @@ enum {
 };
 
 /* Debugging macros */
-const volatile u32 debug = 0;
+const volatile u32 debug = 1;
 /* Scheduling algorithm macros */
-const volatile int use_pct = 0;
+const volatile int use_pct = 1;
 const volatile int use_random_priority_walk = 0;
-const volatile int use_random_walk = 1;
+const volatile int use_random_walk = 0;
 const volatile int num_sched_thread = 2;
 
 bool timer_pinned = true;
@@ -268,9 +268,14 @@ static void handle_sched_ext(struct task_struct *p)
     struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
 
     // If we haven't already, initialize the scheduling algorithm
+    bpf_spin_lock(&job->lock);
     if (!job->initialized_sched_algo && job->num_expected_events != 0) {
+    	job->initialized_sched_algo = true;
+	    bpf_spin_unlock(&job->lock);
 			init_scheduling_algo(eid);
-		}
+		} else {
+	    bpf_spin_unlock(&job->lock);
+    }
 
 	if (!tctx) {
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
@@ -539,6 +544,7 @@ static void reset_job_state(struct sched_job *job)
 	job->num_alive = 0;
 	job->num_ready = 0;
 
+	num_events = job->num_events;
 	if (job->num_expected_events == 0) {
 		job->num_expected_events = job->num_events;
 	}
