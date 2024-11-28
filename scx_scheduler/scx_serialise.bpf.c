@@ -290,9 +290,25 @@ static void handle_sched_ext(struct task_struct *p)
 		return;
 	}
 
+  u64 msg = 0;
+  u64 addr = 0;
+  int is_write = 0; // 1 true, 0 false
+	long status = bpf_probe_read_kernel(&msg, sizeof(msg), &p->rt.timeout);
+	status = status | bpf_probe_read_kernel(&msg, sizeof(addr), &p->rt.back);
+	status = status | bpf_probe_read_kernel(&msg, sizeof(is_write), &p->rt.time_slice);
+	if (status != 0 || msg != 0xdeadbeef) {
+		addr = 0;
+		is_write = 0;
+		warn("failed to read message from task_struct");
+	}
+
     bpf_spin_lock(&tctx->lock);
     tctx->state = THREAD_ENQUEUED;
+    tctx->is_write = (is_write != 0);
+    tctx->next_event_addrs =  addr;
     bpf_spin_unlock(&tctx->lock);
+
+    
 
 	// Update timestamp
 	struct time_callback_ctx tcallbackctx = {
