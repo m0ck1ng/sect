@@ -64,6 +64,7 @@ struct sched_job {
 	int num_total;
 	int num_ready;
 	int num_alive;
+	u32 num_threads_created;
 	u32 num_expected_events;
 	u32 num_events;
 	u32 iterations;
@@ -84,6 +85,13 @@ struct {
 bool RESIZABLE_ARRAY(data, cpu_gimme_task);
 u64 RESIZABLE_ARRAY(data, cpu_started_at);
 
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, MAX_THREADS);
+} pid_to_det_id SEC(".maps");
+
 struct dispatch_timer {
 	struct bpf_timer timer;
 };
@@ -103,6 +111,7 @@ struct {
 struct task_ctx {
 	u32 priority;
 	u32 eid; // id of executor
+	u32 det_id;
 	u64 next_event_addrs;
 	bool is_write;
 	u64 state;
@@ -227,6 +236,7 @@ static struct sched_job* get_or_create_sched_job(u32 eid) {
             .num_alive = 0,
             .num_ready = 0,
             .num_events = 0,
+	    .num_threads_created = 0,
             .iterations = 0,
             .pct_strata = 0,
             .num_expected_events = 0,
@@ -408,7 +418,7 @@ static u64 get_highest_priority(struct bpf_map *map, pid_t *pid,
 		return 1;
 	}
 
-	if (tctx->priority > tcallbackctx->highest_priority) {
+	if (tctx->priority >= tcallbackctx->highest_priority) {
 		tcallbackctx->highest_priority = tctx->priority;
 		tcallbackctx->highest_priority_pid = *pid;
 	}
@@ -568,6 +578,7 @@ static void reset_job_state(struct sched_job *job)
 	job->num_alive = 0;
 	job->num_ready = 0;
 	job->iterations = 0;
+	job->num_threads_created = 0;
 	job->pct_strata = 0;
 
 	num_events = job->num_events;
@@ -686,7 +697,7 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 	from->scx.slice = 0;
 	pid_t pid = from->pid;
 
-    struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+	struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
 	if (tctx)
 		return true;
 
@@ -696,11 +707,26 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 	}
 
 	dbg("[yield] from: %d", from->pid);
+	u32 pid32 = ((u32) pid);
+	u32 *det_id = bpf_map_lookup_elem(&pid_to_det_id, &pid32);
+	u32 det_id_val; 
+	if (det_id) {
+		det_id_val = *det_id;
+	} else {
+		bpf_spin_lock(&job->lock);
+		job->num_threads_created += 1;
+		det_id_val = job->num_threads_created;
+		bpf_spin_unlock(&job->lock);
+		bpf_map_update_elem(&pid_to_det_id, &pid, &det_id_val, BPF_NOEXIST);
+	}
+		
+		
 
 	// Create a new task context
 	struct task_ctx new_ctx = {
-		.priority = 1,
+		.priority = 0,
 		.eid = eid,
+		.det_id = det_id_val,
 		.is_write = false,
 		.next_event_addrs = 0,
 		.state = THREAD_RUNNING,

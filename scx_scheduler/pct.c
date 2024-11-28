@@ -12,8 +12,8 @@
 
 const volatile u32 depth = 3;
 
-u32 get_combined_key(u32 eid, u32 pid) {
-	return ((eid) << 16) | (pid % MAX_THREADS);
+u32 get_combined_key(u32 eid, u32 det_id) {
+	return ((eid) << 16) | (det_id % MAX_THREADS);
 }
 
 /*
@@ -50,9 +50,9 @@ inline s32 get_strata_base(u32 strata)
  * We use % MAX_THREADS to ensure that the index is within the range of the
  * map, and also allow for subsequent processes to get different priorities.
  */
-s32 assign_pct_priority(u32 eid, pid_t pid)
+s32 assign_pct_priority(u32 eid, u32 det_id)
 {
-	u32 index = get_combined_key(eid, pid);
+	u32 index = get_combined_key(eid, det_id);
 	s32 *prio_value = bpf_map_lookup_elem(&pct_priorities, &index);
 	if (prio_value)
 		return *prio_value;
@@ -192,15 +192,23 @@ static s32 update_priorities_pct(u32 eid, pid_t pid) {
 		return -1;
 	}
 
+	struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+	if (!tctx) {
+		dbg("[update_pct_priority] task context not found");
+		return -1;
+	}
+
 	if (n > MAX_THREADS) {
 		bpf_printk("[enqueue] n: %d, MAX_THREADS: %d\n", n,
 			   MAX_THREADS);
 		return -1;
 	}
 
+	bpf_spin_lock(&job->lock);
 	u32 num_events = job->num_events;
 	u32 max_num_events = job->num_expected_events;
 	u32 strata = job->pct_strata;
+	bpf_spin_unlock(&job->lock);
 
 	bpf_for(i, 0, n)
 	{
@@ -226,6 +234,8 @@ static s32 update_priorities_pct(u32 eid, pid_t pid) {
 				    pid, priority);
 				break;
 			}
+		} else if (tctx->priority == 0) {
+			tctx->priority = assign_pct_priority(eid, tctx->det_id);
 		}
 	}
 	return 0;
