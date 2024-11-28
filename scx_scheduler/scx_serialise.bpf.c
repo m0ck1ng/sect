@@ -294,8 +294,8 @@ static void handle_sched_ext(struct task_struct *p)
   u64 addr = 0;
   int is_write = 0; // 1 true, 0 false
 	long status = bpf_probe_read_kernel(&msg, sizeof(msg), &p->rt.timeout);
-	status = status | bpf_probe_read_kernel(&msg, sizeof(addr), &p->rt.back);
-	status = status | bpf_probe_read_kernel(&msg, sizeof(is_write), &p->rt.time_slice);
+	status = status | bpf_probe_read_kernel(&addr, sizeof(addr), &p->rt.back);
+	status = status | bpf_probe_read_kernel(&is_write, sizeof(is_write), &p->rt.time_slice);
 	if (status != 0 || msg != 0xdeadbeef) {
 		addr = 0;
 		is_write = 0;
