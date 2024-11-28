@@ -17,6 +17,7 @@ UEI_DEFINE(uei);
 enum {
 	SCHED_EXT			= 7,
 	MAX_THREADS			= 200,
+	MAX_JOBS                        = 10,
 
 	MS_TO_NS			= 1000LLU * 1000,
 	TIMER_INTERVAL_NS	= 30 * MS_TO_NS,
@@ -65,6 +66,8 @@ struct sched_job {
 	int num_alive;
 	u32 num_expected_events;
 	u32 num_events;
+	u32 iterations;
+	u32 pct_strata;
 	bool initialized_sched_algo;
 	u64 state;
 	struct bpf_spin_lock lock;
@@ -74,7 +77,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
 	__type(value, struct sched_job);
-	__uint(max_entries, 10);
+	__uint(max_entries, MAX_JOBS);
 } sched_job_map SEC(".maps");
 
 /* can't use percpu map due to bad lookups */
@@ -224,6 +227,8 @@ static struct sched_job* get_or_create_sched_job(u32 eid) {
             .num_alive = 0,
             .num_ready = 0,
             .num_events = 0,
+            .iterations = 0,
+            .pct_strata = 0,
             .num_expected_events = 0,
             .initialized_sched_algo = false,
 						.state = JOB_UNAVAILABLE,
@@ -546,6 +551,8 @@ static void reset_job_state(struct sched_job *job)
 	job->num_total = num_sched_thread;
 	job->num_alive = 0;
 	job->num_ready = 0;
+	job->iterations = 0;
+	job->pct_strata = 0;
 
 	num_events = job->num_events;
 	if (job->num_expected_events == 0) {

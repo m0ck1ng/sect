@@ -7,8 +7,6 @@
  * @num_events: the number of enqueue()s that have occurred
  */
 
-u32 iterations, initial_max_num_events, task_count, max_num_events,
-	num_events;
 
 #include "pct.c"
 #include "pos.c"
@@ -21,7 +19,7 @@ s32 update_priorities(pid_t pid, u32 eid, bool initial_run) {
 	} else if (use_random_priority_walk && pid > 0) {
 		update_priorities_rp(pid);
 	} else if (use_pct) {
-		update_priorities_pct(pid);
+		update_priorities_pct(eid, pid);
 	} else if (use_pos) {
 		update_priorities_pos(eid, pid);
 	} else {

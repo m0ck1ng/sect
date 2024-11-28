@@ -11,7 +11,10 @@
  */ 
 
 const volatile u32 depth = 3;
-u32 strata;
+
+u32 get_combined_key(u32 eid, u32 pid) {
+	return ((eid) << 16) | (pid % MAX_THREADS);
+}
 
 /*
  * Map to store the pre-determined priorities for each thread.
@@ -23,6 +26,7 @@ struct {
 	__uint(max_entries, MAX_THREADS);
 } pct_priorities SEC(".maps");
 
+
 /* Swaps two elements in an array */
 static inline void swap(u32 *a, u32 *b)
 {
@@ -32,10 +36,13 @@ static inline void swap(u32 *a, u32 *b)
 }
 
 /* Get strata base for PCT */
-inline s32 get_strata_base()
+inline s32 get_strata_base(u32 strata)
 {
 	return S32_MAX - ((strata + 2) * MAX_THREADS);
 }
+
+
+
 /* 
  * Assign the priority for a thread based on the pre-determined priorities
  * in the pct_priorities map.
@@ -43,15 +50,16 @@ inline s32 get_strata_base()
  * We use % MAX_THREADS to ensure that the index is within the range of the
  * map, and also allow for subsequent processes to get different priorities.
  */
-s32 assign_pct_priority(pid_t pid)
+s32 assign_pct_priority(u32 eid, pid_t pid)
 {
-	u32 index = (u32)pid % MAX_THREADS;
+	u32 index = get_combined_key(eid, pid);
 	s32 *prio_value = bpf_map_lookup_elem(&pct_priorities, &index);
 	if (prio_value)
 		return *prio_value;
 
 	return -1;
 }
+
 
 /*
  * Map to store the pre-determined change points for each iteration.
@@ -69,7 +77,7 @@ struct {
  * Shuffle the priorities in the pct_priorities map. This function is called
  * during init() of the scheduler, and after each iteration.
  */
-static void shuffle_prios()
+static void shuffle_prios(u32 eid, u32 strata)
 {
 	u32 *prio_value, *value_i, *value_j;
 	u32 index, i, actual_i, actual_j;
@@ -77,17 +85,17 @@ static void shuffle_prios()
 	/* Reset the priorities for the new iteration */
 	bpf_for(i, depth, depth + MAX_THREADS)
 	{
-		index = i - depth;
+		index = get_combined_key(eid, i - depth);
 		prio_value = bpf_map_lookup_elem(&pct_priorities, &index);
 		if (prio_value)
-			*prio_value = get_strata_base() + i;
+			*prio_value = get_strata_base(strata) + i;
 	}
 
 	/* Shuffle the resetted priorities using Fisher–Yates algorithm */
 	bpf_for(i, 1, MAX_THREADS)
 	{
-		actual_i = MAX_THREADS - i;
-		actual_j = bpf_get_prandom_u32() % actual_i;
+		actual_i = get_combined_key(eid, MAX_THREADS - i);
+		actual_j = get_combined_key(eid, bpf_get_prandom_u32() % actual_i);
 		value_i = bpf_map_lookup_elem(&pct_priorities, &actual_i);
 		value_j = bpf_map_lookup_elem(&pct_priorities, &actual_j);
 		if (value_i && value_j) {
@@ -103,7 +111,7 @@ static void shuffle_prios()
  * Choose the change points for the next iteration. This function is called
  * during init() of the scheduler, and after each iteration.
  */
-static void choose_change_points()
+static void choose_change_points(u32 max_num_events)
 {
 	/* 
 	 * This occurs in a multi-process environment, where the main threads
@@ -163,32 +171,36 @@ s32 init_pct(u32 eid) {
 		bpf_printk("[pct-init] job not found\n");
 		return -1;
 	}
+
 	dbg("[init] depth: %d\n", depth);
-	iterations = 0;
-	max_num_events = job->num_expected_events;
-	strata = 0;
-	task_count = 0;
-	num_events = 0;
-	shuffle_prios();
-	choose_change_points();
-	strata = 0;
+	shuffle_prios(eid, job->pct_strata);
+	choose_change_points(job->num_expected_events);
 	return 0;
 }
 
-static s32 update_priorities_pct(pid_t pid) {
+static s32 update_priorities_pct(u32 eid, pid_t pid) {
 	s32 priority = -1;
 	/* 
 	 * For PCT, check if a change_point is incurred. If so, update the
 	 * priority of the task.
 	 */
 	u32 n = depth - 1, i;
-	num_events += 1;
+
+	struct sched_job* job = bpf_map_lookup_elem(&sched_job_map, &eid);
+	if (!job) {
+		bpf_printk("[pct-init] job not found\n");
+		return -1;
+	}
 
 	if (n > MAX_THREADS) {
 		bpf_printk("[enqueue] n: %d, MAX_THREADS: %d\n", n,
 			   MAX_THREADS);
 		return -1;
 	}
+
+	u32 num_events = job->num_events;
+	u32 max_num_events = job->num_expected_events;
+	u32 strata = job->pct_strata;
 
 	bpf_for(i, 0, n)
 	{
@@ -208,7 +220,7 @@ static s32 update_priorities_pct(pid_t pid) {
 					    strata);
 				}
 
-				priority = get_strata_base() + i + 1;
+				priority = get_strata_base(strata) + i + 1;
 				update_priority(pid, priority);
 				dbg("[enqueue] UPDATE pid: %d, priority: %d\n",
 				    pid, priority);
