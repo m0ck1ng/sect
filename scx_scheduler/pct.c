@@ -105,8 +105,8 @@ static void shuffle_prios(u32 eid, u32 strata)
 		if (value_i && value_j) {
 			swap(value_i, value_j);
 		} else {
-			// warn("[shuffle_prios] failed to swap values at index: %d and %d\n",
-			//     actual_i, actual_j);
+			warn("[shuffle_prios] failed to swap values at index: %d and %d\n",
+			    actual_i, actual_j);
 		}
 	}
 }
