@@ -16,11 +16,15 @@ u32 get_combined_key(u32 eid, u32 det_id) {
 	return ((eid) << 16) | (det_id % MAX_THREADS);
 }
 
+u32 get_combined_changepoint_key(u32 eid, u32 change_point) {
+	return ((eid) << 16) | (change_point);
+}
+
 /*
  * Map to store the pre-determined priorities for each thread.
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
 	__type(value, u32);
 	__uint(max_entries, MAX_THREADS);
@@ -52,6 +56,7 @@ inline s32 get_strata_base(u32 strata)
  */
 s32 assign_pct_priority(u32 eid, u32 det_id)
 {
+	dbg("[pct] assign initial priority");
 	u32 index = get_combined_key(eid, det_id);
 	s32 *prio_value = bpf_map_lookup_elem(&pct_priorities, &index);
 	if (prio_value)
@@ -65,7 +70,7 @@ s32 assign_pct_priority(u32 eid, u32 det_id)
  * Map to store the pre-determined change points for each iteration.
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
 	__type(value, u32);
 	__uint(max_entries,
@@ -86,9 +91,8 @@ static void shuffle_prios(u32 eid, u32 strata)
 	bpf_for(i, depth, depth + MAX_THREADS)
 	{
 		index = get_combined_key(eid, i - depth);
-		prio_value = bpf_map_lookup_elem(&pct_priorities, &index);
-		if (prio_value)
-			*prio_value = get_strata_base(strata) + i;
+		u32 val = get_strata_base(strata) + i; 
+		bpf_map_update_elem(&pct_priorities, &index, &val, BPF_ANY);
 	}
 
 	/* Shuffle the resetted priorities using Fisher–Yates algorithm */
@@ -101,8 +105,8 @@ static void shuffle_prios(u32 eid, u32 strata)
 		if (value_i && value_j) {
 			swap(value_i, value_j);
 		} else {
-			warn("[shuffle_prios] failed to swap values at index: %d and %d\n",
-			     actual_i, actual_j);
+			// warn("[shuffle_prios] failed to swap values at index: %d and %d\n",
+			//     actual_i, actual_j);
 		}
 	}
 }
@@ -111,7 +115,7 @@ static void shuffle_prios(u32 eid, u32 strata)
  * Choose the change points for the next iteration. This function is called
  * during init() of the scheduler, and after each iteration.
  */
-static void choose_change_points(u32 max_num_events)
+static void choose_change_points(u32 eid, u32 max_num_events)
 {
 	/* 
 	 * This occurs in a multi-process environment, where the main threads
@@ -128,8 +132,9 @@ static void choose_change_points(u32 max_num_events)
 		bpf_for(i, 0, n)
 		{
 			u32 change_point = i;
+			u32 change_point_key = get_combined_changepoint_key(eid, i);
 			long status = bpf_map_update_elem(
-				&pct_change_points, &i, &change_point, BPF_ANY);
+				&pct_change_points, &change_point_key, &change_point, BPF_ANY);
 			if (status)
 				warn("[choose_change_points] failed to update change_point[%d]: %d\n",
 				     i, change_point);
@@ -152,7 +157,8 @@ static void choose_change_points(u32 max_num_events)
 		/* NOTE: THERE MAY BE DUPLICATE CHANGE POINTS */
 		change_point = (bpf_get_prandom_u32() % max_num_events) +
 			       1; // [1, max_num_events]
-		status = bpf_map_update_elem(&pct_change_points, &i,
+		u32 change_point_key = get_combined_changepoint_key(eid, i);
+		status = bpf_map_update_elem(&pct_change_points, &change_point_key,
 					     &change_point, BPF_ANY);
 		if (status)
 			warn("[choose_change_points] failed to update change_point[%d]: %d\n",
@@ -174,7 +180,7 @@ s32 init_pct(u32 eid) {
 
 	dbg("[init] depth: %d\n", depth);
 	shuffle_prios(eid, job->pct_strata);
-	choose_change_points(job->num_expected_events);
+	choose_change_points(eid, job->num_expected_events);
 	return 0;
 }
 
@@ -212,7 +218,8 @@ static s32 update_priorities_pct(u32 eid, pid_t pid) {
 
 	bpf_for(i, 0, n)
 	{
-		u32 *change_point = bpf_map_lookup_elem(&pct_change_points, &i);
+		u32 change_point_key = get_combined_changepoint_key(eid, i);
+		u32 *change_point = bpf_map_lookup_elem(&pct_change_points, &change_point_key);
 		if (change_point) {
 			// dbg("[enqueue] %d until change \n",
 			//     *change_point - (num_events %

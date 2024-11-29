@@ -89,7 +89,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__type(key, u32);
 	__type(value, u32);
-	__uint(max_entries, MAX_THREADS);
+	__uint(max_entries, 2000);
 } pid_to_det_id SEC(".maps");
 
 struct dispatch_timer {
@@ -717,6 +717,7 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 		job->num_threads_created += 1;
 		det_id_val = job->num_threads_created;
 		bpf_spin_unlock(&job->lock);
+		dbg("[yield] new pid %u-->%u on job %u", pid, det_id_val, eid);
 		bpf_map_update_elem(&pid_to_det_id, &pid, &det_id_val, BPF_NOEXIST);
 	}
 		
