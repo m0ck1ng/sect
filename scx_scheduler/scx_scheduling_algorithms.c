@@ -7,42 +7,38 @@
  * @num_events: the number of enqueue()s that have occurred
  */
 
-u32 iterations, initial_max_num_events, task_count, max_num_events,
-	num_events;
 
-// #include "pct.c"
+#include "pct.c"
+#include "pos.c"
 #include "random-walk.c"
 #include "random-priority.c"
 
-void update_priorities(pid_t pid, u32 eid) {
-	// if (use_pct) {
-	// 	update_priorities_pct(eid);
-	// } else if (use_random_walk) {
-	// 	update_priorities_rw(eid);			
-	// } else if (use_random_priority_walk) {
-	// 	update_priorities_rp(eid);
-	// }
-
-	if (use_random_walk) {
+s32 update_priorities(pid_t pid, u32 eid, bool initial_run) {
+	if (use_random_walk || (initial_run && use_pct)) {
 		update_priorities_rw(eid);			
 	} else if (use_random_priority_walk && pid > 0) {
 		update_priorities_rp(pid);
+	} else if (use_pct) {
+		update_priorities_pct(eid, pid);
+	} else if (use_pos) {
+		update_priorities_pos(eid, pid);
+	} else {
+		return -1;
 	}
+
+	return 0;
 }
 
-int init_scheduling_algo() {
-	// if (use_pct) {
-	// 	return init_pct();
-	// } else if (use_random_walk) {
-	// 	return init_rw();			
-	// } else if (use_random_priority_walk) {
-	// 	return init_rp();
-	// }
-	
+int init_scheduling_algo(u32 eid) {
 	if (use_random_walk) {
 		return init_rw();			
 	} else if (use_random_priority_walk) {
 		return init_rp();
+	} else if (use_pct) {
+		return init_pct(eid);
+	} else if (use_pos) {
+		return init_pos();
+	} else {
+		return -1;
 	}
-	return 0;
 }

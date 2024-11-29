@@ -17,6 +17,7 @@ UEI_DEFINE(uei);
 enum {
 	SCHED_EXT			= 7,
 	MAX_THREADS			= 200,
+	MAX_JOBS                        = 10,
 
 	MS_TO_NS			= 1000LLU * 1000,
 	TIMER_INTERVAL_NS	= 30 * MS_TO_NS,
@@ -33,11 +34,12 @@ enum {
 };
 
 /* Debugging macros */
-const volatile u32 debug = 0;
+const volatile u32 debug = 1;
 /* Scheduling algorithm macros */
 const volatile int use_pct = 0;
+const volatile int use_pos = 1;
 const volatile int use_random_priority_walk = 0;
-const volatile int use_random_walk = 1;
+const volatile int use_random_walk = 0;
 const volatile int num_sched_thread = 2;
 
 bool timer_pinned = true;
@@ -62,6 +64,12 @@ struct sched_job {
 	int num_total;
 	int num_ready;
 	int num_alive;
+	u32 num_threads_created;
+	u32 num_expected_events;
+	u32 num_events;
+	u32 iterations;
+	u32 pct_strata;
+	bool initialized_sched_algo;
 	u64 state;
 	struct bpf_spin_lock lock;
 };
@@ -70,12 +78,19 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
 	__type(value, struct sched_job);
-	__uint(max_entries, 10);
+	__uint(max_entries, MAX_JOBS);
 } sched_job_map SEC(".maps");
 
 /* can't use percpu map due to bad lookups */
 bool RESIZABLE_ARRAY(data, cpu_gimme_task);
 u64 RESIZABLE_ARRAY(data, cpu_started_at);
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, 2000);
+} pid_to_det_id SEC(".maps");
 
 struct dispatch_timer {
 	struct bpf_timer timer;
@@ -96,6 +111,9 @@ struct {
 struct task_ctx {
 	u32 priority;
 	u32 eid; // id of executor
+	u32 det_id;
+	u64 next_event_addrs;
+	bool is_write;
 	u64 state;
 	u64 last_enqueue_time;
 	struct bpf_spin_lock lock;
@@ -214,10 +232,16 @@ static struct sched_job* get_or_create_sched_job(u32 eid) {
     if (!job) {
         // Create a new scheduling job
         struct sched_job new_job = {
-			.num_total = num_sched_thread,
+						.num_total = num_sched_thread,
             .num_alive = 0,
             .num_ready = 0,
-			.state = JOB_UNAVAILABLE,
+            .num_events = 0,
+	    .num_threads_created = 0,
+            .iterations = 0,
+            .pct_strata = 0,
+            .num_expected_events = 0,
+            .initialized_sched_algo = false,
+						.state = JOB_UNAVAILABLE,
             .lock = {},
         };
         bpf_map_update_elem(&sched_job_map, &eid, &new_job, BPF_NOEXIST);
@@ -260,14 +284,41 @@ static void handle_sched_ext(struct task_struct *p)
 	}
 
     struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+
+    // If we haven't already, initialize the scheduling algorithm
+    bpf_spin_lock(&job->lock);
+    if (!job->initialized_sched_algo && job->num_expected_events != 0) {
+    	job->initialized_sched_algo = true;
+	    bpf_spin_unlock(&job->lock);
+			init_scheduling_algo(eid);
+		} else {
+	    bpf_spin_unlock(&job->lock);
+    }
+
 	if (!tctx) {
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		return;
 	}
 
+  u64 msg = 0;
+  u64 addr = 0;
+  int is_write = 0; // 1 true, 0 false
+	long status = bpf_probe_read_kernel(&msg, sizeof(msg), &p->rt.timeout);
+	status = status | bpf_probe_read_kernel(&addr, sizeof(addr), &p->rt.back);
+	status = status | bpf_probe_read_kernel(&is_write, sizeof(is_write), &p->rt.time_slice);
+	if (status != 0 || msg != 0xdeadbeef) {
+		addr = 0;
+		is_write = 0;
+		warn("failed to read message from task_struct");
+	}
+
     bpf_spin_lock(&tctx->lock);
     tctx->state = THREAD_ENQUEUED;
+    tctx->is_write = (is_write != 0);
+    tctx->next_event_addrs =  addr;
     bpf_spin_unlock(&tctx->lock);
+
+    
 
 	// Update timestamp
 	struct time_callback_ctx tcallbackctx = {
@@ -281,6 +332,7 @@ static void handle_sched_ext(struct task_struct *p)
 	u64 state;
     bpf_spin_lock(&job->lock);
     job->num_ready++;
+    job->num_events += 1;
 	if (job->state == JOB_READY || job->state == JOB_UNAVAILABLE)
 		all_tasks_ready = job->num_ready == job->num_total;
 	else if (job->state == JOB_RUNNING)
@@ -292,11 +344,11 @@ static void handle_sched_ext(struct task_struct *p)
 	state = job->state;
     bpf_spin_unlock(&job->lock);
 
-	dbg("[handle_sched_ext] state: %d, num_alive: %d, num_ready: %d, num total: %d", state, num_alive, num_ready, num_total);
+		dbg("[handle_sched_ext] state: %d, num_alive: %d, num_ready: %d, num total: %d", state, num_alive, num_ready, num_total);
 
     // If all tasks are ready, proceed to update priorities and enqueue for dispatch
+    update_priorities(pid, eid, !job->initialized_sched_algo);
     if (all_tasks_ready) {
-        update_priorities(pid, eid);
         dbg("[handle_sched_ext] enqueueing eid: %d for dispatch", eid);
         enqueue_eid_for_dispatch(eid, false);
     }
@@ -366,7 +418,7 @@ static u64 get_highest_priority(struct bpf_map *map, pid_t *pid,
 		return 1;
 	}
 
-	if (tctx->priority > tcallbackctx->highest_priority) {
+	if (tctx->priority >= tcallbackctx->highest_priority) {
 		tcallbackctx->highest_priority = tctx->priority;
 		tcallbackctx->highest_priority_pid = *pid;
 	}
@@ -520,12 +572,26 @@ static void handle_sleep(struct task_struct *p)
 
 static void reset_job_state(struct sched_job *job)
 {
+	int num_events = 0;
 	bpf_spin_lock(&job->lock);
 	job->num_total = num_sched_thread;
 	job->num_alive = 0;
 	job->num_ready = 0;
+	job->iterations = 0;
+	job->num_threads_created = 0;
+	job->pct_strata = 0;
+
+	num_events = job->num_events;
+	if (job->num_expected_events == 0) {
+		job->num_expected_events = job->num_events;
+	}
+
+	job->num_events = 0;
+	job->initialized_sched_algo = false;
+
 	job->state = JOB_UNAVAILABLE;
 	bpf_spin_unlock(&job->lock);
+	dbg("[reset_job_state] finished job with %d events", num_events);
 }
 
 static void handle_exit(struct task_struct *p)
@@ -631,7 +697,7 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 	from->scx.slice = 0;
 	pid_t pid = from->pid;
 
-    struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+	struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
 	if (tctx)
 		return true;
 
@@ -641,11 +707,29 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 	}
 
 	dbg("[yield] from: %d", from->pid);
+	u32 pid32 = ((u32) pid);
+	u32 *det_id = bpf_map_lookup_elem(&pid_to_det_id, &pid32);
+	u32 det_id_val; 
+	if (det_id) {
+		det_id_val = *det_id;
+	} else {
+		bpf_spin_lock(&job->lock);
+		job->num_threads_created += 1;
+		det_id_val = job->num_threads_created;
+		bpf_spin_unlock(&job->lock);
+		dbg("[yield] new pid %u-->%u on job %u", pid, det_id_val, eid);
+		bpf_map_update_elem(&pid_to_det_id, &pid, &det_id_val, BPF_NOEXIST);
+	}
+		
+		
 
 	// Create a new task context
 	struct task_ctx new_ctx = {
-		.priority = 1,
+		.priority = 0,
 		.eid = eid,
+		.det_id = det_id_val,
+		.is_write = false,
+		.next_event_addrs = 0,
 		.state = THREAD_RUNNING,
 		.lock = {},
 	};
