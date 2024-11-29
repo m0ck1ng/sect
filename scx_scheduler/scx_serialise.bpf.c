@@ -36,8 +36,8 @@ enum {
 /* Debugging macros */
 const volatile u32 debug = 1;
 /* Scheduling algorithm macros */
-const volatile int use_pct = 1;
-const volatile int use_pos = 0;
+const volatile int use_pct = 0;
+const volatile int use_pos = 1;
 const volatile int use_random_priority_walk = 0;
 const volatile int use_random_walk = 0;
 const volatile int num_sched_thread = 2;
@@ -344,11 +344,11 @@ static void handle_sched_ext(struct task_struct *p)
 	state = job->state;
     bpf_spin_unlock(&job->lock);
 
-	dbg("[handle_sched_ext] state: %d, num_alive: %d, num_ready: %d, num total: %d", state, num_alive, num_ready, num_total);
+		dbg("[handle_sched_ext] state: %d, num_alive: %d, num_ready: %d, num total: %d", state, num_alive, num_ready, num_total);
 
     // If all tasks are ready, proceed to update priorities and enqueue for dispatch
+    update_priorities(pid, eid, !job->initialized_sched_algo);
     if (all_tasks_ready) {
-        update_priorities(pid, eid, !job->initialized_sched_algo);
         dbg("[handle_sched_ext] enqueueing eid: %d for dispatch", eid);
         enqueue_eid_for_dispatch(eid, false);
     }
