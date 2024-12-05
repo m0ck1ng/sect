@@ -36,8 +36,8 @@ enum {
 /* Debugging macros */
 const volatile u32 debug = 1;
 /* Scheduling algorithm macros */
-const volatile int use_pct = 0;
-const volatile int use_pos = 1;
+const volatile int use_pct = 1;
+const volatile int use_pos = 0;
 const volatile int use_random_priority_walk = 0;
 const volatile int use_random_walk = 0;
 const volatile int num_sched_thread = 2;
@@ -60,10 +60,16 @@ u64 nr_timeout;
 			bpf_printk(fmt, ##args); \
 	} while (0)
 
+// INVARIANTS:
+// 	num_alive - num_asleep == num_ready <==> we can dispatch
+// 	num_alive == num_total               ==> the job is ready for scheduling 
+// 	num_alive == num_asleep              ==> the job is deadlocked 
+// 	num_alive == 0                       ==> the job is finished 
 struct sched_job {
-	int num_total;
-	int num_ready;
-	int num_alive;
+	int num_total;  // NUMBER OF TOTAL TASKS EXPECTED TO BE CREATED
+	int num_ready;  // NUMBER OF ENQUEUED TASKS THAT COULD BE DISPATCHED
+	int num_asleep; // NUMBER OF TASKS THAT ARE ASLEEP 
+	int num_alive;  // NUMBER OF TASKS THAT HAVE NOT YET EXITED
 	u32 num_threads_created;
 	u32 num_expected_events;
 	u32 num_events;
@@ -89,7 +95,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__type(key, u32);
 	__type(value, u32);
-	__uint(max_entries, 2000);
+	__uint(max_entries, MAX_THREADS);
 } pid_to_det_id SEC(".maps");
 
 struct dispatch_timer {
@@ -112,6 +118,7 @@ struct task_ctx {
 	u32 priority;
 	u32 eid; // id of executor
 	u32 det_id;
+	bool is_asleep;
 	u64 next_event_addrs;
 	bool is_write;
 	u64 state;
@@ -234,6 +241,7 @@ static struct sched_job* get_or_create_sched_job(u32 eid) {
         struct sched_job new_job = {
 						.num_total = num_sched_thread,
             .num_alive = 0,
+            .num_asleep = 0,
             .num_ready = 0,
             .num_events = 0,
 	    .num_threads_created = 0,
@@ -300,9 +308,9 @@ static void handle_sched_ext(struct task_struct *p)
 		return;
 	}
 
-  u64 msg = 0;
-  u64 addr = 0;
-  int is_write = 0; // 1 true, 0 false
+  	u64 msg = 0;
+  	u64 addr = 0;
+  	int is_write = 0; // 1 true, 0 false
 	long status = bpf_probe_read_kernel(&msg, sizeof(msg), &p->rt.timeout);
 	status = status | bpf_probe_read_kernel(&addr, sizeof(addr), &p->rt.back);
 	status = status | bpf_probe_read_kernel(&is_write, sizeof(is_write), &p->rt.time_slice);
@@ -317,8 +325,6 @@ static void handle_sched_ext(struct task_struct *p)
     tctx->is_write = (is_write != 0);
     tctx->next_event_addrs =  addr;
     bpf_spin_unlock(&tctx->lock);
-
-    
 
 	// Update timestamp
 	struct time_callback_ctx tcallbackctx = {
@@ -336,7 +342,7 @@ static void handle_sched_ext(struct task_struct *p)
 	if (job->state == JOB_READY || job->state == JOB_UNAVAILABLE)
 		all_tasks_ready = job->num_ready == job->num_total;
 	else if (job->state == JOB_RUNNING)
-		all_tasks_ready = job->num_ready == job->num_alive;
+		all_tasks_ready = job->num_ready == job->num_alive - job->num_asleep;
 
 	num_ready = job->num_ready;
 	num_alive = job->num_alive;
@@ -344,10 +350,10 @@ static void handle_sched_ext(struct task_struct *p)
 	state = job->state;
     bpf_spin_unlock(&job->lock);
 
-		dbg("[handle_sched_ext] state: %d, num_alive: %d, num_ready: %d, num total: %d", state, num_alive, num_ready, num_total);
+	dbg("[handle_sched_ext] eid: %d, state: %d, num_alive: %d, num_ready: %d, num total: %d", eid, state, num_alive, num_ready, num_total);
 
+	update_priorities(pid, eid, !job->initialized_sched_algo);
     // If all tasks are ready, proceed to update priorities and enqueue for dispatch
-    update_priorities(pid, eid, !job->initialized_sched_algo);
     if (all_tasks_ready) {
         dbg("[handle_sched_ext] enqueueing eid: %d for dispatch", eid);
         enqueue_eid_for_dispatch(eid, false);
@@ -498,7 +504,7 @@ void BPF_STRUCT_OPS(serialise_dispatch, s32 cpu, struct task_struct *p)
 	if (tcallbackctx.highest_priority_pid == -1)
 		return;
 
-	dbg("[dispatch] highest pid: %d", tcallbackctx.highest_priority_pid);
+	dbg("[dispatch] highest pid: %d, priority: %d", tcallbackctx.highest_priority_pid, tcallbackctx.highest_priority);
 
 	dispatch_highest_priority_thread(&tcallbackctx);
 
@@ -521,6 +527,27 @@ void BPF_STRUCT_OPS(serialise_runnable, struct task_struct *p, u64 enq_flags)
 {	
 	if (!is_sched_ext(p))
 		return;
+
+	u32 eid = identify_group(p);
+
+	// Retrieve or create scheduling job
+  struct sched_job *job = bpf_map_lookup_elem(&sched_job_map, &eid);
+  if (!job)
+	  return;
+
+  pid_t pid = p->pid;
+
+  struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
+  if (!tctx) {
+  	return;
+	}
+
+	bpf_spin_lock(&tctx->lock);
+  if (tctx->is_asleep) {
+  	tctx->is_asleep = false;
+  	job->num_asleep -= 1;
+  }
+	bpf_spin_unlock(&tctx->lock);
 
 	dbg("[runnable] pid: %d", p->pid);
 }
@@ -553,18 +580,21 @@ static void handle_sleep(struct task_struct *p)
 	if (!tctx)
 		return;
 
+	tctx->is_asleep = true;
+
 	int num_alive, num_ready, num_total;
 	u64 state;
 	bpf_spin_lock(&job->lock);
 	state = job->state;
+	job->num_asleep += 1;
 	num_total = job->num_total;
 	num_alive = job->num_alive;
 	num_ready = job->num_ready;
 	bpf_spin_unlock(&job->lock);
 
-	dbg("[handle_sleep] num_alive: %d, num_ready: %d, num total: %d", num_alive, num_ready, num_total);
+	dbg("[handle_sleep] num_alive: %d (%d asleep), num_ready: %d, num total: %d", num_alive, job->num_asleep, num_ready, num_total);
 
-	if (num_ready && state == JOB_RUNNING) {
+	if (num_ready == num_alive - job->num_asleep && state == JOB_RUNNING) {
 		dbg("[handle_sleep] enqueue_eid_for_dispatch");
 		enqueue_eid_for_dispatch(eid, false);
 	}
@@ -717,7 +747,6 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 		job->num_threads_created += 1;
 		det_id_val = job->num_threads_created;
 		bpf_spin_unlock(&job->lock);
-		dbg("[yield] new pid %u-->%u on job %u", pid, det_id_val, eid);
 		bpf_map_update_elem(&pid_to_det_id, &pid, &det_id_val, BPF_NOEXIST);
 	}
 		
@@ -728,6 +757,7 @@ bool BPF_STRUCT_OPS(serialise_yield, struct task_struct *from,
 		.priority = 0,
 		.eid = eid,
 		.det_id = det_id_val,
+		.is_asleep = false,
 		.is_write = false,
 		.next_event_addrs = 0,
 		.state = THREAD_RUNNING,
