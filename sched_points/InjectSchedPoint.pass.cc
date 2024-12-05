@@ -233,6 +233,7 @@ bool MemInstr::instrumentCall(CallInst *I, const DataLayout &DL)
 
 	bool IsWrite;  
 	Value* Addr;
+	bool instrumentBefore = true;
 
 	if (   FunctionName == "spin_lock"
 			|| FunctionName == "spin_lock_bh"
@@ -273,8 +274,11 @@ bool MemInstr::instrumentCall(CallInst *I, const DataLayout &DL)
 			|| FunctionName == "write_sequnlock"
 			|| FunctionName == "write_sequnlock_irq"
 			|| FunctionName == "read_sequnlock_excl"
-			|| FunctionName == "kfree"
 	) {
+		Addr = I->getArgOperand(0);
+		IsWrite = true;
+		instrumentBefore = false;
+	} else if (FunctionName == "kfree") {
 		Addr = I->getArgOperand(0);
 		IsWrite = true;
 	} else if (FunctionName == "rcu_read_lock") {
@@ -285,6 +289,7 @@ bool MemInstr::instrumentCall(CallInst *I, const DataLayout &DL)
 		llvm::ConstantInt *ConstInt = llvm::ConstantInt::get(llvm::Type::getInt64Ty(Ctx), 0x1);
 		Addr = llvm::ConstantExpr::getIntToPtr( ConstInt, llvm::Type::getInt8PtrTy(Ctx) );
 		IsWrite = true;
+		instrumentBefore = false;
 	} else {
 		return false;
 	}	
@@ -313,10 +318,15 @@ bool MemInstr::instrumentCall(CallInst *I, const DataLayout &DL)
 
 	ConstantInt *IsWriteVal = ConstantInt::get(IntegerType::getInt1Ty(Ctx), IsWrite);
 
-	// auto NI = I->getNextNonDebugInstruction();
-	// IRBuilder<> Builder(NI);
-	IRBuilder<> Builder(I);
+	Instruction* II;
+	if (!instrumentBefore && !I->isTerminator()) {
+		II = I->getNextNonDebugInstruction();
+	} else {
+		II = I;
+	}		 
 
+	// IRBuilder<> Builder(NI);
+	IRBuilder<> Builder(II);
 
 	Value *AddrPtr = Builder.CreatePointerCast(Addr, IRBuilder<>(Ctx).getInt8PtrTy());
 	auto CI = Builder.CreateCall(Yield, {AddrPtr, IsWriteVal});
