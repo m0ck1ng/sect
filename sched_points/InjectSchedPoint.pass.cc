@@ -455,7 +455,7 @@ bool MemInstr::instrumentAll(Function &F, const TargetLibraryInfo &TLI)
 		            				|| FunctionName == "rcu_read_unlock"
 		            				|| FunctionName == "kfree"
 			              ) {
-													dbgs() << "=== Instrumenting " << FunctionName << " call in " << F.getName() << " ===\n";
+													// dbgs() << "=== Instrumenting " << FunctionName << " call in " << F.getName() << " ===\n";
 
 													AllCalls.push_back(Call);
 		                }
@@ -480,15 +480,17 @@ bool MemInstr::instrumentAll(Function &F, const TargetLibraryInfo &TLI)
 		Res |= instrumentLoadOrStore(Inst, DL);
 		NumInjected += Res;
 	}
+	int numLS = NumInjected;
 
 	for (auto Inst : AllCalls)
 	{
 		Res |= instrumentCall(Inst, DL);
 		NumInjected += Res;
 	}	
+	int numCall = NumInjected - numLS;
 
 	if (NumInjected > 0) {
-		dbgs() << "--- Instrumented " << NumInjected << " locations in " << F.getName() << "---\n";
+		dbgs() << "--- Instrumented (" << numLS << " LD/ST, " << numCall << " CALL) locations in " << F.getName() << "---\n";
 	}
 
 	return Res | HasCall;
