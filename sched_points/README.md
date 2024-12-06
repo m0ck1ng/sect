@@ -20,7 +20,6 @@ void check_preempt_and_yield(void* addr, bool is_write) {
 		get_current_state() == TASK_RUNNING &&
 		!current->non_block_count &&
 		!is_idle_task(current) &&
-		!current->non_block_count &&
 		preempt_count() == 0 &&
 		!irqs_disabled() &&
 		(rcu_preempt_depth() << MIGHT_RESCHED_RCU_SHIFT) == 0 ) {
@@ -94,7 +93,7 @@ This is the latest style for invoking passes.
 clang -fpass-plugin=/home/pass/Meminstr/build/libInjectSchedPoint.so
 ```
 
-Patch the makefile of targeted modules (drivers, net, io_uring, fs, ipc).
+Patch the makefile of targeted modules (drivers, net, io_uring, fs, ipc, mm).
 ```Makefile
 KBUILD_CFLAGS += -fpass-plugin=/home/pass/Meminstr/build/libInjectSchedPoint.so
 ```
