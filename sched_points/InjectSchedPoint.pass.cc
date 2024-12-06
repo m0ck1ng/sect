@@ -39,9 +39,11 @@ private:
 		const DataLayout &DL);
 	bool addrPointsToConstantData(Value *Addr);
 	bool instrumentLoadOrStore(Instruction *I, const DataLayout &DL);
+	bool instrumentCall(CallInst *I, const DataLayout &DL);
 	int getMemoryAccessFuncIndex(Value *Addr, const DataLayout &DL);
 
 	SmallVector<Instruction *, 8> AllLoadsAndStores;
+	SmallVector<CallInst *, 8> AllCalls;
 	SmallVector<Instruction *, 8> LocalLoadsAndStores;
 	// Accesses sizes are powers of two: 1, 2, 4, 8, 16.
 	static const size_t kNumberOfAccessSizes = 5;
@@ -207,6 +209,137 @@ bool MemInstr::addrPointsToConstantData(Value *Addr)
 // 	return Idx;
 // }
 
+
+bool MemInstr::instrumentCall(CallInst *I, const DataLayout &DL)
+{
+	auto Loc = I->getDebugLoc();
+	Module &M = *I->getParent()->getParent()->getParent();
+	auto &Ctx = M.getContext();
+
+	// STEP 1: Inject the declaration of printf
+	FunctionType *YieldTy = FunctionType::get(
+		IntegerType::getInt32Ty(Ctx),
+		{PointerType::getUnqual(IntegerType::getInt8Ty(Ctx)), // Parameter `void*addr`
+		IntegerType::getInt1Ty(Ctx)},						  // Parameter `bool isWrite`
+		false);
+
+	FunctionCallee Yield = M.getOrInsertFunction("check_preempt_and_yield", YieldTy);
+
+	Function *YieldF = dyn_cast<Function>(Yield.getCallee());
+	YieldF->setDoesNotThrow();
+
+
+	StringRef FunctionName = I->getCalledFunction()->getName();
+
+	bool IsWrite;  
+	Value* Addr;
+	bool instrumentBefore = true;
+
+	if (   FunctionName == "spin_lock"
+			|| FunctionName == "spin_lock_bh"
+			|| FunctionName == "spin_lock_irq"
+			|| FunctionName == "spin_lock_irqsave"
+			|| FunctionName == "queued_spin_lock"
+			|| FunctionName == "queued_spin_trylock"
+			|| FunctionName == "down"
+			|| FunctionName == "down_interruptible"
+			|| FunctionName == "down_killable"
+			|| FunctionName == "down_trylock"
+			|| FunctionName == "down_timeout"
+			|| FunctionName == "down_read"
+			|| FunctionName == "down_read_trylock"
+			|| FunctionName == "down_write"
+			|| FunctionName == "down_write_trylock"
+			|| FunctionName == "mutex_lock"
+			|| FunctionName == "mutex_lock_interruptible"
+			|| FunctionName == "mutex_lock_killable"
+			|| FunctionName == "mutex_lock_trylock"
+			|| FunctionName == "read_seqbegin"
+			|| FunctionName == "read_seqretry"
+			|| FunctionName == "write_seqlock"
+			|| FunctionName == "write_seqlock_irq"
+			|| FunctionName == "read_seqlock_excl"
+	) {
+		Addr = I->getArgOperand(0);
+		IsWrite = false;
+	} else if (FunctionName == "spin_unlock"
+			|| FunctionName == "spin_unlock_bh"
+			|| FunctionName == "spin_unlock_irq"
+			|| FunctionName == "spin_unlock_irqrestore"
+			|| FunctionName == "queued_spin_unlock"
+			|| FunctionName == "up"
+			|| FunctionName == "up_read"
+			|| FunctionName == "up_write"
+			|| FunctionName == "mutex_unlock"
+			|| FunctionName == "write_sequnlock"
+			|| FunctionName == "write_sequnlock_irq"
+			|| FunctionName == "read_sequnlock_excl"
+	) {
+		Addr = I->getArgOperand(0);
+		IsWrite = true;
+		instrumentBefore = false;
+	} else if (FunctionName == "kfree") {
+		Addr = I->getArgOperand(0);
+		IsWrite = true;
+	} else if (FunctionName == "rcu_read_lock") {
+		llvm::ConstantInt *ConstInt = llvm::ConstantInt::get(llvm::Type::getInt64Ty(Ctx), 0x1);
+		Addr = llvm::ConstantExpr::getIntToPtr( ConstInt, llvm::Type::getInt8PtrTy(Ctx) );
+		IsWrite = false;
+	} else if (FunctionName == "rcu_read_unlock") {
+		llvm::ConstantInt *ConstInt = llvm::ConstantInt::get(llvm::Type::getInt64Ty(Ctx), 0x1);
+		Addr = llvm::ConstantExpr::getIntToPtr( ConstInt, llvm::Type::getInt8PtrTy(Ctx) );
+		IsWrite = true;
+		instrumentBefore = false;
+	} else {
+		return false;
+	}	
+
+	if (!Addr->getType()->isPointerTy()) {
+		return false;
+	}
+
+	if (Addr->isSwiftError())
+	{
+		dbgs() << "isSwiftError\n";
+		return false;
+	}
+
+	if (!I->getParent()) {
+		return false;
+	}
+
+	// int Idx = getMemoryAccessFuncIndex(Addr, DL);
+	// if (Idx < 0){
+	// 	dbgs() << "idx < 0\n";
+	// 	return false;
+	// }
+
+	// dbgs() << " Injecting call to yield inside " << I->getParent()->getName() << " function\n";
+
+	ConstantInt *IsWriteVal = ConstantInt::get(IntegerType::getInt1Ty(Ctx), IsWrite);
+
+	Instruction* II;
+	if (!instrumentBefore && !I->isTerminator()) {
+		II = I->getNextNonDebugInstruction();
+	} else {
+		II = I;
+	}		 
+
+	// IRBuilder<> Builder(NI);
+	IRBuilder<> Builder(II);
+
+	Value *AddrPtr = Builder.CreatePointerCast(Addr, IRBuilder<>(Ctx).getInt8PtrTy());
+	auto CI = Builder.CreateCall(Yield, {AddrPtr, IsWriteVal});
+	CI->setDebugLoc(Loc);
+
+	// dbgs() << " I: " <<  I << "\n";
+	// dbgs() << "CI: " << CI << "\n";
+
+	NumInstrumentedSchedPoints++;
+
+	return true;
+}
+
 bool MemInstr::instrumentLoadOrStore(Instruction *I, const DataLayout &DL)
 {
 	auto Loc = I->getDebugLoc();
@@ -276,6 +409,60 @@ bool MemInstr::instrumentAll(Function &F, const TargetLibraryInfo &TLI)
 				if (CallInst *CI = dyn_cast<CallInst>(&Inst))
 					maybeMarkSanitizerLibraryCallNoBuiltin(CI, &TLI);
 
+		    if (auto *Call = dyn_cast<CallInst>(&Inst))
+	        {
+		        if (Function *CalledFunction = Call->getCalledFunction())
+		            {
+		                // Check the name of the called function
+		                StringRef FunctionName = CalledFunction->getName();
+		                if (   FunctionName == "spin_lock"
+		            				|| FunctionName == "spin_lock_bh"
+		            				|| FunctionName == "spin_lock_irq"
+		            				|| FunctionName == "spin_lock_irqsave"
+		            				|| FunctionName == "spin_unlock"
+		            				|| FunctionName == "spin_unlock_bh"
+		            				|| FunctionName == "spin_unlock_irq"
+		            				|| FunctionName == "spin_unlock_irqrestore"
+		            				|| FunctionName == "queued_spin_lock"
+		            				|| FunctionName == "queued_spin_trylock"
+		            				|| FunctionName == "queued_spin_unlock"
+		            				|| FunctionName == "down"
+		            				|| FunctionName == "down_interruptible"
+		            				|| FunctionName == "down_killable"
+		            				|| FunctionName == "down_trylock"
+		            				|| FunctionName == "down_timeout"
+		            				|| FunctionName == "up"
+		            				|| FunctionName == "down_read"
+		            				|| FunctionName == "down_read_trylock"
+		            				|| FunctionName == "up_read"
+		            				|| FunctionName == "down_write"
+		            				|| FunctionName == "down_write_trylock"
+		            				|| FunctionName == "up_write"
+		            				|| FunctionName == "mutex_lock"
+		            				|| FunctionName == "mutex_lock_interruptible"
+		            				|| FunctionName == "mutex_lock_killable"
+		            				|| FunctionName == "mutex_lock_trylock"
+		            				|| FunctionName == "mutex_unlock"
+												|| FunctionName == "read_seqbegin"
+												|| FunctionName == "read_seqretry"
+												|| FunctionName == "write_seqlock"
+												|| FunctionName == "write_sequnlock"
+												|| FunctionName == "write_seqlock_irq"
+												|| FunctionName == "write_sequnlock_irq"
+												|| FunctionName == "read_seqlock_excl"
+												|| FunctionName == "read_sequnlock_excl"
+		            				|| FunctionName == "rcu_read_lock"
+		            				|| FunctionName == "rcu_read_unlock"
+		            				|| FunctionName == "kfree"
+			              ) {
+													// dbgs() << "=== Instrumenting " << FunctionName << " call in " << F.getName() << " ===\n";
+
+													AllCalls.push_back(Call);
+		                }
+		            }
+          }
+				
+
 				HasCall = true;
 				chooseInstructionsToInstrument(LocalLoadsAndStores, AllLoadsAndStores, DL);
 				if (isBUG_X86_64(&Inst))
@@ -293,8 +480,18 @@ bool MemInstr::instrumentAll(Function &F, const TargetLibraryInfo &TLI)
 		Res |= instrumentLoadOrStore(Inst, DL);
 		NumInjected += Res;
 	}
-	dbgs() << "=== Instrumenting a function " << F.getName() << " ===\n";
-	dbgs() << "size of collected Load or Store inst: " << NumInjected << "\n";
+	int numLS = NumInjected;
+
+	for (auto Inst : AllCalls)
+	{
+		Res |= instrumentCall(Inst, DL);
+		NumInjected += Res;
+	}	
+	int numCall = NumInjected - numLS;
+
+	if (NumInjected > 0) {
+		dbgs() << "--- Instrumented (" << numLS << " LD/ST, " << numCall << " CALL) locations in " << F.getName() << "---\n";
+	}
 
 	return Res | HasCall;
 }
