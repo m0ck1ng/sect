@@ -325,11 +325,24 @@ bool MemInstr::instrumentCall(CallInst *I, const DataLayout &DL)
 		II = I;
 	}		 
 
+	const MDNode *MD = Loc.getAsMDNode();
+	uint64_t MetadataAddress = reinterpret_cast<uintptr_t>(MD);
+
+
+	Constant * MetadataAddressAsInt = ConstantInt::get(Type::getInt64Ty(Ctx), 0);
+	if (Loc) {
+		DIScope *Scope = dyn_cast<DIScope>(Loc.getScope());	
+		if (Scope) {
+			MetadataAddressAsInt = ConstantInt::get(Type::getInt64Ty(Ctx), MetadataAddress);
+			dbgs() << "\n!!~~" << Scope->getFilename() << ":" << Loc->getLine() << "," << MetadataAddress << "\n";
+		}
+	}
+
+	// auto NI = I->getNextNonDebugInstruction();
 	// IRBuilder<> Builder(NI);
 	IRBuilder<> Builder(II);
-
 	Value *AddrPtr = Builder.CreatePointerCast(Addr, IRBuilder<>(Ctx).getInt8PtrTy());
-	auto CI = Builder.CreateCall(Yield, {AddrPtr, IsWriteVal});
+	auto CI = Builder.CreateCall(Yield, {AddrPtr, IsWriteVal, MetadataAddressAsInt});	// IRBuilder<> Builder(NI);
 	CI->setDebugLoc(Loc);
 
 	// dbgs() << " I: " <<  I << "\n";
@@ -377,12 +390,26 @@ bool MemInstr::instrumentLoadOrStore(Instruction *I, const DataLayout &DL)
 
 	ConstantInt *IsWriteVal = ConstantInt::get(IntegerType::getInt1Ty(Ctx), IsWrite);
 
+	const MDNode *MD = Loc.getAsMDNode();
+	uint64_t MetadataAddress = reinterpret_cast<uintptr_t>(MD);
+
+	Constant * MetadataAddressAsInt = ConstantInt::get(Type::getInt64Ty(Ctx), 0);
+	if (Loc) {
+		DIScope *Scope = dyn_cast<DIScope>(Loc.getScope());	
+		if (Scope) {
+			MetadataAddressAsInt = ConstantInt::get(Type::getInt64Ty(Ctx), MetadataAddress);
+			dbgs() << "\n!!~~" << Scope->getFilename() << ":" << Loc->getLine() << "," << MetadataAddress << "\n";
+		}
+	}
+
 	// auto NI = I->getNextNonDebugInstruction();
 	// IRBuilder<> Builder(NI);
 	IRBuilder<> Builder(I);
 	Value *AddrPtr = Builder.CreatePointerCast(Addr, IRBuilder<>(Ctx).getInt8PtrTy());
-	auto CI = Builder.CreateCall(Yield, {AddrPtr, IsWriteVal});
+	auto CI = Builder.CreateCall(Yield, {AddrPtr, IsWriteVal, MetadataAddressAsInt});
 	CI->setDebugLoc(Loc);
+
+
 
 	NumInstrumentedSchedPoints++;
 
