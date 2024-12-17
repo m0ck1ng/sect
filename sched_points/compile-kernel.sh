@@ -14,4 +14,4 @@ make CC=clang-$V \
     HOSTAR=llvm-ar-$V \
     HOSTLD=ld.lld-$V \
     V=0 \
-    -j 10 2>&1 | tee build_log.txt
+    2>&1 | tee build_log.txt
