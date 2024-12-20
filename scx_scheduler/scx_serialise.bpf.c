@@ -873,6 +873,7 @@ struct sched_ext_ops serialise_ops = {
 	.exit_task = (void *)serialise_exit_task,
 	.init = (void *)serialise_init,
 	.exit = (void *)serialise_exit,
+	.flags = SCX_OPS_ENQ_LAST,
 	.timeout_ms = 30000,
 	.name = "serialise",
 };
