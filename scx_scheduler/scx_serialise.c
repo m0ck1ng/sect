@@ -18,7 +18,6 @@ const char help_fmt[] =
 	"Usage: %s [-s NUM_SCHED_TASK] [-s SEED] [-d DEPTH]\n"
 	"\n"
 	"  -n            Enter number of tasks involved in scheduling.\n"
-	"  -s            Enter seed for the RNG. Default: 0xdeadbeef.\n"
 	"  -d            Enter depth of bug to search for. Default: 3.\n"
 	"  -h            Display this help and exit\n"
 	"  -r            (PCT disabled) 1 for random priority walk, 2 for random walk 2, Default: 2. \n";
@@ -51,15 +50,30 @@ int main(int argc, char **argv)
 		case 'r':
 			unsigned long v = strtoul(optarg, NULL, 10);
 			if (v) {
-				printf("use random walk: %lu\n", v);
-				skel->rodata->use_pct = 0;
-
 				if (v == 1) {
+					printf("using strategy: random walk\n");
 					skel->rodata->use_random_priority_walk = 1;
 					skel->rodata->use_random_walk = 0;
+					skel->rodata->use_pct = 0;
+					skel->rodata->use_pos = 0;
 				} else if (v == 2) {
+					printf("using strategy: random priority\n");
 					skel->rodata->use_random_priority_walk = 0;
 					skel->rodata->use_random_walk = 1;
+					skel->rodata->use_pct = 0;
+					skel->rodata->use_pos = 0;
+				} else if (v == 3){
+					printf("using strategy: pct\n");
+					skel->rodata->use_random_priority_walk = 0;
+					skel->rodata->use_random_walk = 0;
+					skel->rodata->use_pct = 1;
+					skel->rodata->use_pos = 0;
+				} else if (v == 4){
+					printf("using strategy: pos\n");
+					skel->rodata->use_random_priority_walk = 0;
+					skel->rodata->use_random_walk = 0;
+					skel->rodata->use_pct = 0;
+					skel->rodata->use_pos = 1;
 				} else {
 					SCX_BUG_ON(1, "Invalid option for -r");
 				}
@@ -84,7 +98,7 @@ int main(int argc, char **argv)
 		       skel->bss->nr_dispatch,
 		       skel->bss->nr_timeout);
 		fflush(stdout);
-		sleep(1);
+		sleep(10);
 	}
 
 	bpf_link__destroy(link);
