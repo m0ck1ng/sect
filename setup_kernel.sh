@@ -21,7 +21,7 @@ cd $TAG
 git checkout -- .
 git clean -f
 
-cp ../KCONFIG.config . 
+cp ../KCONFIG.config .config
 cp ../compile.sh . 
 
 PREPEND=$(cat <<- DELIM
