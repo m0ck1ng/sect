@@ -287,7 +287,7 @@ static void handle_sched_ext(struct task_struct *p)
 	// Retrieve or create scheduling job
     struct sched_job *job = bpf_map_lookup_elem(&sched_job_map, &eid);
     if (!job || job->state == JOB_TIMEOUT) {
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
         return;
 	}
 
@@ -304,7 +304,7 @@ static void handle_sched_ext(struct task_struct *p)
     }
 
 	if (!tctx) {
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		return;
 	}
 
@@ -380,7 +380,7 @@ void BPF_STRUCT_OPS(serialise_enqueue, struct task_struct *p, u64 enq_flags)
 	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (!is_sched_ext(p) || is_kthread(p)) {
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		return;
 	}
 
@@ -463,7 +463,7 @@ dispatch_highest_priority_thread(struct tctx_callback_ctx *tcallbackctx)
 		// dispatched_pid, tcallbackctx->highest_priority);
 
 	/* Dispatch the task */
-	scx_bpf_dispatch(highest_prio_p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL,
+	scx_bpf_dispatch(highest_prio_p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
 				0);
 
 	/* Clean up and release reference to the task */
