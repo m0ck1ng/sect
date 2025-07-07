@@ -2,17 +2,15 @@
 set -e
 
 PASS_PATH=$(pwd)/sched_points/build/libInjectSchedPoint.so
-PASS_PATH=/home/wolffd/git/fuzz/externals/sched_ext/llvm-instr/scheduler/sched_points/build/libInjectSchedPoint.so
 
 TAG="${1:-HEAD}"
 if [ $TAG = "HEAD" ]; then
-	# git clone --depth 1 https://github.com/torvalds/linux.git $TAG
-	# cd $TAG
-	# COMMIT=$(git rev-parse --short HEAD)
-	# cd ..
-	# mv $TAG linux-upstream-$COMMIT
-	# TAG=linux-upstream-$COMMIT
-	TAG=linux-upstream-fbfd64d25
+	git clone --depth 1 https://github.com/torvalds/linux.git $TAG
+	cd $TAG
+	COMMIT=$(git rev-parse --short HEAD)
+	cd ..
+	mv $TAG linux-upstream-$COMMIT
+	TAG=linux-upstream-$COMMIT
 else
 	git clone --branch $TAG --depth 1 https://github.com/torvalds/linux.git $TAG
 fi
