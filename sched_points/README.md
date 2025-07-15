@@ -3,7 +3,7 @@
 ## Make kernel patch
 
 Update additional build flags for kernel Makefile.
-```bash
+```Makefile
 # add debug info
 KBUILD_CFLAGS += -g
 # generate bitcode
@@ -12,21 +12,40 @@ KBUILD_CFLAGS += -save-temps=obj
 
 Patch the kernel file `kernel\schd\core.c`
 ```C
-void check_preempt_and_yield(void) {
+void check_preempt_and_yield(void* addr, bool is_write) {
+	u64 old_rt_timeout;
+	int old_rt_timeslice;
+	void* old_rt_back;
     if (current->policy == SCHED_EXT && 
-		get_current_state() == TASK_RUNNING && 
-		preemptible()) {
+		get_current_state() == TASK_RUNNING &&
+		!current->non_block_count &&
+		!is_idle_task(current) &&
+		preempt_count() == 0 &&
+		!irqs_disabled() &&
+		(rcu_preempt_depth() << MIGHT_RESCHED_RCU_SHIFT) == 0 ) {
         // printk(KERN_EMERG "Preemption is enabled; yielding.\n");
 		// DO NOT USE `schedule()` here as it may lead to dangeous sleep state.
+
+	old_rt_timeout = current->rt.timeout;
+	old_rt_timeslice = current->rt.time_slice;
+	old_rt_back = current->rt.back;
+	current->rt.timeout = 0xdeadbeef;
+	current->rt.time_slice = is_write;
+	current->rt.back = addr; 
         yield();
+        current->rt.timeout = old_rt_timeout;
+	current->rt.time_slice = old_rt_timeslice;
+	current->rt.back = old_rt_back; 
     }
 }
 EXPORT_SYMBOL(check_preempt_and_yield);
 ```
 
 ## Compile kernel with LLVM
-```
+```bash
 make CC=clang defconfig
+# customize kernel config here
+make CC=clang olddefconfig
 make CC=clang \
     LD=ld.lld \
     AR=llvm-ar \
@@ -71,5 +90,10 @@ clang -Xclang -load -Xclang "/home/pass/Meminstr/build/libInjectSchedPoint.so"
 
 This is the latest style for invoking passes.
 ```bash
-clang -fpass-plugin=./Hello/build/libHelloPass.so 
+clang -fpass-plugin=/home/pass/Meminstr/build/libInjectSchedPoint.so
+```
+
+Patch the makefile of targeted modules (drivers, net, io_uring, fs, ipc, mm).
+```Makefile
+KBUILD_CFLAGS += -fpass-plugin=/home/pass/Meminstr/build/libInjectSchedPoint.so
 ```
