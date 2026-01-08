@@ -1,0 +1,33 @@
+void check_preempt_and_yield(void* addr, bool is_write, u64 id) {
+        u64 old_rt_timeout;
+        int old_rt_timeslice;
+        void* old_rt_back;
+        void* old_rt_runlist_next;
+        if (current->policy == SCHED_EXT &&
+                get_current_state() == TASK_RUNNING &&
+                !current->non_block_count &&
+                !is_idle_task(current) &&
+                preempt_count() == 0 &&
+                !irqs_disabled() &&
+                (rcu_preempt_depth() << MIGHT_RESCHED_RCU_SHIFT) == 0 ) {
+
+                // printk(KERN_EMERG "Preemption is enabled; yielding.\n");
+                // DO NOT USE `schedule()` here as it may lead to dangeous sleep state.
+
+                old_rt_timeout = current->rt.timeout;
+                old_rt_timeslice = current->rt.time_slice;
+                old_rt_back = current->rt.back;
+                old_rt_runlist_next = current->rt.run_list.next;
+                current->rt.timeout = 0xdeadbeef;
+                current->rt.time_slice = is_write;
+                current->rt.back = addr;
+                current->rt.run_list.next = (struct list_head *) __builtin_return_address(0);
+                yield();
+                current->rt.timeout = old_rt_timeout;
+                current->rt.time_slice = old_rt_timeslice;
+                current->rt.back = old_rt_back;
+                current->rt.run_list.next = old_rt_runlist_next;
+                // printk(KERN_INFO "check_preempt_and_yield called from: %p\n", __builtin_return_address(0));
+        }
+}
+EXPORT_SYMBOL(check_preempt_and_yield);
