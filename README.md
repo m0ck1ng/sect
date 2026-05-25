@@ -26,7 +26,7 @@ At a high level, this script:
 Once the target kernel has been set up, it can be compiled via the `./compile.sh` script, which should be copied into the root directory of that kernel. Note that before compiling the target kernel, you should compile the LLVM pass in the `./sched_points` directory, with the following command:
 
 ```
-cmake -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Debug -B build 
+cmake -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Debug -B build; cd build; make
 ```
 
 Once the kernel has been compiled, you can create a disk images with e.g. `syzkaller/tools
