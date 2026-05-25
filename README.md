@@ -42,7 +42,8 @@ sudo qemu-system-x86_64 \
     -net user,host=10.0.2.10,hostfwd=tcp:127.0.0.1:$((10021+$i))-:22 \
     -net nic,model=e1000 \
     -snapshot \
-    -enable-kvm 
+    -enable-kvm \
+    -nographic
 ```
 
 Note that the port forwarding is to allow copying the eBPF program via `scp`:
