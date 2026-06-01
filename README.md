@@ -16,11 +16,9 @@ SECT is a tool for systematically testing concurrency bugs in the Linux kernel. 
 │   ├── triage/            # Fetch and cache syzbot bug reports
 │   └── analysis/          # Plot experiment results
 ├── benchmarks/            # 10 known kernel concurrency bugs with reproducers
-├── syzkaller/             # SECT fork of syzkaller (patched for SCHED_EXT)
-└── segfuzz/               # Segfuzz integration
-    ├── segfuzz.md         # Setup and usage instructions
-    ├── segfuzz.patch      # Patch for the Segfuzz fuzzer
-    └── segfuzz_linux.patch # Complementary Linux-side patch
+├── configs/               # Example configuration files
+│   └── syzkaller.cfg.example  # Sample syzkaller manager config for SECT
+└── syzkaller/             # SECT fork of syzkaller (patched for SCHED_EXT)
 ```
 
 ### `instrumentation/`
@@ -57,6 +55,16 @@ The userspace + eBPF scheduler loaded into the kernel via `sched_ext`. It interc
 ### `benchmarks/`
 
 Ten confirmed concurrency bugs in the Linux kernel, sourced from syzbot and the kernel commit history. Each entry has a fix commit and at least one reproducer (`repro.prog` for syzkaller programs, `repro.c` for standalone C). See [`benchmarks/README.md`](benchmarks/README.md) for the full bug table.
+
+### `configs/`
+
+- **`syzkaller.cfg.example`** — sample syzkaller manager configuration for running SECT. Copy it, adjust the paths to match your environment, and pass it to `syz-manager`:
+  ```bash
+  cp configs/syzkaller.cfg.example configs/syzkaller.cfg
+  # edit configs/syzkaller.cfg
+  syz-manager -config configs/syzkaller.cfg
+  ```
+  Key fields to update: `kernel_obj`, `image`, `sshkey`, `syzkaller`, `scheduler_bin`, and `vm.kernel`.
 
 ## Prerequisites
 
@@ -164,10 +172,6 @@ From a second terminal inside the VM, replay a syzkaller reproducer using `syz-e
 ```bash
 syz-execprog -executor ./syz-executor benchmarks/CVE-2024-50125/repro.prog
 ```
-
-## Segfuzz Integration
-
-See [`segfuzz/segfuzz.md`](segfuzz/segfuzz.md) for instructions on applying `segfuzz/segfuzz.patch` to the Segfuzz fuzzer and `segfuzz/segfuzz_linux.patch` to the Linux source tree.
 
 ## Benchmarks
 

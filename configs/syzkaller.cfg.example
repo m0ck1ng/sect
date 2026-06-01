@@ -1,0 +1,19 @@
+{
+        "target": "linux/amd64",
+        "http": "0.0.0.0:56741",
+        "workdir": "/home/workdir",
+        "kernel_obj": "/data/kernel/linux-6.18.23",
+        "image": "/home/workdir/trixie.img",
+        "sshkey": "/home/workdir/trixie.id_rsa",
+        "syzkaller": "/home/syzkaller",
+        "procs": 4,
+        "type": "qemu",
+        "reproduce": true,
+        "scheduler_bin": "/data/kernel/linux-6.18.23/tools/sched_ext/build/bin/scx_serialise",
+        "vm": {
+                "count": 4,
+                "kernel": "/home/workdir/bzImage",
+                "cpu": 2,
+                "mem": 2048
+        }
+}
