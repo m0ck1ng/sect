@@ -152,30 +152,30 @@ static void handle_serialise_enqueue(struct task_struct *p)
 	u32 eid = identify_executor_group(p);
 
 	if (eid == INVALID_EID) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		return;
 	}
 
 	if (!is_sched_ext(p)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		return;
 	}
 
 	struct sched_cycle *cycle = bpf_map_lookup_elem(&sched_cycle_map, &eid);
 	if (!cycle || cycle->state == CYCLE_TIMEOUT) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		return;
 	}
 
 	struct task_ctx *tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
 	if (!tctx) {
 		if (ensure_task_ctx(p, eid)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+			scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 			return;
 		}
 		tctx = bpf_map_lookup_elem(&task_ctx_map, &pid);
 		if (!tctx) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+			scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 			return;
 		}
 	}
@@ -185,7 +185,7 @@ static void handle_serialise_enqueue(struct task_struct *p)
 	bpf_spin_unlock(&tctx->lock);
 	if (task_state == THREAD_REGISTERED || task_state == THREAD_IGNORED) {
 		__sync_fetch_and_add(&nr_ignored_enqueue, 1);
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		return;
 	}
 
@@ -297,7 +297,7 @@ s32 BPF_STRUCT_OPS(serialise_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(serialise_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	if (is_kthread(p)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		return;
 	}
 	handle_serialise_enqueue(p);
