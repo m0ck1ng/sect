@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PASS_PATH=$(pwd)/sched_points/build/libInjectSchedPoint.so
+PASS_PATH=$(pwd)/instrumentation/build/libInjectSchedPoint.so
 
 TAG="${1:-HEAD}"
 if [ $TAG = "HEAD" ]; then
@@ -19,8 +19,8 @@ cd $TAG
 git checkout -- .
 git clean -f
 
-cp ../KCONFIG.config .config
-cp ../compile.sh . 
+cp ../scripts/kernel/KCONFIG.config .config
+cp ../scripts/kernel/compile.sh .
 
 PREPEND=$(cat <<- DELIM
 	# add debug info
@@ -42,7 +42,7 @@ echo "KBUILD_CFLAGS += -fpass-plugin=$PASS_PATH" >> net/Makefile
 
 sed -i 's/c-sched-targets = .*/c-sched-targets = scx_serialise/' tools/sched_ext/Makefile 
 
-cat ../sched_points/func.append  >> kernel/sched/core.c
+cat ../instrumentation/func.append >> kernel/sched/core.c
 echo "void check_preempt_and_yield(void* addr, bool is_write, u64 id);" >> kernel/sched/sched.h
 
-cp -r ../scx_scheduler/* tools/sched_ext
+cp -r ../scheduler/* tools/sched_ext

@@ -1,38 +1,133 @@
-﻿# SECT (Sched-Ext Concurrency Tester)
- 
-This repository contains the artifact for SECT, a tool which serializes OS or application execution using eBPF for testing.
+# SECT — Sched-Ext Concurrency Tester
 
-## Layout
-The layout of this repo is as follows:
+SECT is a tool for systematically testing concurrency bugs in the Linux kernel. It serializes kernel execution at fine-grained scheduling points injected by an LLVM pass, then drives the resulting deterministic scheduler via the kernel's `sched_ext` (SCX) framework and eBPF. This controlled interleaving enables reproducible triggering of race conditions that are otherwise timing-dependent.
 
-1. `sched_points/` -- the LLVM instrumentation pass for injecting additional scheduling points into the kernel
-2. `scripts/` -- scripts used for bug triage and data-analysis of experiments
-3. `scx_scheduler/` -- the SECT scheduler eBPF program, including several scheduling algorithm implementations
-4. `syzkaller/` -- the SECT fork of syzkaller, with modifications to increase the amount of programs generated during fuzzing which have concurrent behaviors
-
-## Usage
-
-
-To get started with SECT, you can use the `./setup_kernel.sh <TAG>` script, with the git branch as the <TAG>.
-Note that this script may break on kernel versions other than `v6.13`, but it should be relatively easy to manually extrapolate the changes to other kernel versions by reading the script itself.
-At a high level, this script:
-
-1. Clones the selected branch of the Linux kernel
-2. Copies the KCONFIG we use for SECT into that kernel
-3. Adds some CFLAGS to various Makefiles
-4. Adds our LLVM instrumentation as a pass for various modules
-5. Copies the SECT scheduler eBPF program into the target kernel
-
-Once the target kernel has been set up, it can be compiled via the `./compile.sh` script, which should be copied into the root directory of that kernel. Note that before compiling the target kernel, you should compile the LLVM pass in the `./sched_points` directory, with the following command:
+## Repository Layout
 
 ```
-cmake -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Debug -B build; cd build; make
+.
+├── instrumentation/       # LLVM pass — injects scheduling points into kernel code
+├── scheduler/             # SECT eBPF scheduler (sched_ext)
+├── scripts/               # All project scripts
+│   ├── kernel/            # Kernel setup and compilation
+│   │   ├── setup_kernel.sh    # Patch and configure a kernel source tree
+│   │   ├── compile.sh         # Build the instrumented kernel with Clang/LLVM 16
+│   │   └── KCONFIG.config     # Kernel .config used for SECT experiments
+│   ├── triage/            # Fetch and cache syzbot bug reports
+│   └── analysis/          # Plot experiment results
+├── benchmarks/            # 10 known kernel concurrency bugs with reproducers
+├── syzkaller/             # SECT fork of syzkaller (patched for SCHED_EXT)
+└── segfuzz/               # Segfuzz integration
+    ├── segfuzz.md         # Setup and usage instructions
+    ├── segfuzz.patch      # Patch for the Segfuzz fuzzer
+    └── segfuzz_linux.patch # Complementary Linux-side patch
 ```
 
-Once the kernel has been compiled, you can create a disk images with e.g. `syzkaller/tools
-/create-image.sh` and run it in QEMU with something like:
+### `instrumentation/`
 
+An LLVM pass (`InjectSchedPoint`) that rewrites kernel bitcode to insert calls to `check_preempt_and_yield()` before every memory access in targeted subsystems (drivers, net, io_uring, fs). This turns ordinary kernel code into a fully cooperative, scheduler-controlled execution model.
+
+- `InjectSchedPoint.pass.cc` — pass implementation
+- `func.append` — the `check_preempt_and_yield` function appended to `kernel/sched/core.c`
+- `CMakeLists.txt` — pass build configuration
+
+See [`instrumentation/README.md`](instrumentation/README.md) for build details and how to invoke the pass with `opt` or the Clang pipeline.
+
+### `scheduler/`
+
+The userspace + eBPF scheduler loaded into the kernel via `sched_ext`. It intercepts scheduling decisions and implements several interleaving strategies:
+
+| File | Description |
+|------|-------------|
+| `scx_serialise.bpf.c` | Main eBPF scheduler skeleton |
+| `scx_serialise.c` | Userspace loader |
+| `scx_algo.bpf.h` | Algorithm dispatch logic |
+| `pct.bpf.h` | PCT (Probabilistic Concurrency Testing) |
+| `pos.bpf.h` | POS (Partial Order Sampling) |
+| `random_priority.bpf.h` | Random-priority interleaving |
+
+### `scripts/`
+
+- **`kernel/setup_kernel.sh`** — clones and patches a Linux kernel tree for use with SECT. Must be run from the project root.
+- **`kernel/compile.sh`** — installs build dependencies and compiles the kernel with the full LLVM 16 toolchain. Copied into the kernel root by `setup_kernel.sh`.
+- **`kernel/KCONFIG.config`** — the kernel `.config` used for all SECT experiments.
+- **`triage/get_data.py`** — queries syzbot and caches results to `current-cache.csv` / `historical.csv` for offline triage.
+- **`analysis/plot.py`** — reads experiment CSV output and produces Kaplan-Meier survival curves comparing SECT variants against native execution.
+
+### `benchmarks/`
+
+Ten confirmed concurrency bugs in the Linux kernel, sourced from syzbot and the kernel commit history. Each entry has a fix commit and at least one reproducer (`repro.prog` for syzkaller programs, `repro.c` for standalone C). See [`benchmarks/README.md`](benchmarks/README.md) for the full bug table.
+
+## Prerequisites
+
+**Host machine**
+
+- Clang/LLVM 16 (`clang-16`, `llvm-ar-16`, `ld.lld-16`, etc.)
+- CMake ≥ 3.13
+- Standard kernel build dependencies (installed automatically by `compile.sh`):
+  `build-essential bc flex bison libssl-dev libelf-dev libncurses-dev dwarves pahole`
+- QEMU with KVM support
+- Python 3 with `polars`, `lifelines`, `matplotlib`, `seaborn`, `tqdm` (for scripts)
+
+**Target kernel:** Linux `v6.13` (other versions require manual adaptation of `setup_kernel.sh`)
+
+## Getting Started
+
+### 1. Build the LLVM pass
+
+```bash
+cd instrumentation
+cmake -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Debug -B build
+cd build && make
+cd ../..
 ```
+
+The shared library is written to `instrumentation/build/libInjectSchedPoint.so`.
+
+### 2. Set up the kernel source tree
+
+```bash
+./scripts/kernel/setup_kernel.sh v6.13
+```
+
+This script:
+1. Clones the `v6.13` branch of the Linux kernel
+2. Copies `KCONFIG.config` as the kernel `.config`
+3. Prepends debug and bitcode flags to the top-level `Makefile`
+4. Appends the LLVM pass plugin flag to the Makefiles of `fs/`, `io_uring/`, `drivers/`, and `net/`
+5. Appends `func.append` to `kernel/sched/core.c`
+6. Copies the SCX scheduler sources into `tools/sched_ext/`
+
+To target the latest upstream instead of a tagged branch:
+
+```bash
+./scripts/kernel/setup_kernel.sh HEAD
+```
+
+### 3. Compile the instrumented kernel
+
+```bash
+cd v6.13
+./compile.sh
+```
+
+`compile.sh` installs build dependencies and invokes `make` with the full LLVM 16 toolchain. Adjust the `-j 10` flag to match your CPU count.
+
+### 4. Create a disk image
+
+Use the helper bundled with the syzkaller fork:
+
+```bash
+syzkaller/tools/create-image.sh
+```
+
+### 5. Boot the kernel in QEMU
+
+```bash
+HOST_PORT=10021
+IMAGE_DIR=/path/to/image
+LINUX_DIR=/path/to/v6.13
+
 sudo qemu-system-x86_64 \
     -m 8G \
     -smp 6 \
@@ -46,12 +141,34 @@ sudo qemu-system-x86_64 \
     -nographic
 ```
 
-Note that the port forwarding is to allow copying the eBPF program via `scp`:
+### 6. Deploy and load the SECT scheduler
 
+Copy the compiled scheduler binary into the VM:
+
+```bash
+scp -P $HOST_PORT -i $IMAGE_DIR/bookworm.id_rsa \
+    $LINUX_DIR/tools/sched_ext/scx_serialise \
+    root@localhost:/root/scx_serialise
 ```
-scp -P 10021 -i image/bookworm.id_rsa $LINUX_DIR/tools/sched_ext/scx_serialise root@localhost:/root/scx_serialise
+
+Inside the VM, activate the serializing scheduler:
+
+```bash
+./scx_serialise
 ```
 
-Inside the VM, to load the serializer scheduling policy, just run `./scx_serialize`.
+### 7. Run a test program
 
-From a different terminal inside the VM, you can then execute a syzkaller program with `syz-execprog` in the normal way, which we have patched to use the `SCHED_EXT` scheduling policy by default.
+From a second terminal inside the VM, replay a syzkaller reproducer using `syz-execprog` (our patched version defaults to `SCHED_EXT`):
+
+```bash
+syz-execprog -executor ./syz-executor benchmarks/CVE-2024-50125/repro.prog
+```
+
+## Segfuzz Integration
+
+See [`segfuzz/segfuzz.md`](segfuzz/segfuzz.md) for instructions on applying `segfuzz/segfuzz.patch` to the Segfuzz fuzzer and `segfuzz/segfuzz_linux.patch` to the Linux source tree.
+
+## Benchmarks
+
+The `benchmarks/` directory contains reproducers for 10 concurrency bugs spanning networking, filesystems, and VFS. See [`benchmarks/README.md`](benchmarks/README.md) for the full list with fix commits.
