@@ -429,8 +429,6 @@ func (tool *FuzzerTool) grabStats() map[string]uint64 {
 		stats["concurr exec total"] += atomic.SwapUint64(&proc.env.StatConcurrExecs, 0)
 		stats["seq exec total"] += atomic.SwapUint64(&proc.env.StatSeqExecs, 0)
 		stats["sched collide total"] += atomic.SwapUint64(&proc.env.StatSchedCollide, 0)
-		stats["exec time total"] += atomic.SwapUint64(&proc.env.StatExecTime, 0)
-		stats["exec total new"] += atomic.SwapUint64(&proc.env.StatExecsNew, 0)
 	}
 	stats["buffer too small"] = atomic.SwapUint64(&tool.bufferTooSmall, 0)
 	return stats

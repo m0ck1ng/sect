@@ -101,14 +101,7 @@ func (proc *Proc) executeRaw(opts *ipc.ExecOpts, p *prog.Prog) *ipc.ProgInfo {
 			// Limit concurrency.
 			ticket := proc.tool.gate.Enter()
 			proc.logProgram(opts, p)
-			start := time.Now()
 			output, info, hanged, err = proc.env.Exec(opts, p)
-			if err == nil && !hanged && info != nil {
-				end := time.Now()
-				duration := end.Sub(start)
-			   	atomic.AddUint64(&proc.env.StatExecTime, uint64(duration.Milliseconds()))
-				atomic.AddUint64(&proc.env.StatExecsNew, 1)
-			}
 			proc.tool.gate.Leave(ticket)
 		}
 		if err != nil {

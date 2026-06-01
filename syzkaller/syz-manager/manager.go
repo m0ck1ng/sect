@@ -256,9 +256,6 @@ func RunManager(cfg *mgrconfig.Config) {
 			// seqExecuted := mgr.stats.seqExeclTotal.get()
 			// concurrExecuted := mgr.stats.concurrExeclTotal.get()
 			schedCollided := mgr.stats.schedCollideTotal.get()
-			execTimeTotal := mgr.stats.execTimeTotal.get()
-			executedNew := mgr.stats.execTotalNew.get()
-            costPerExec := float64(execTimeTotal) / float64(executedNew)
 			crashes := mgr.stats.crashes.get()
 			corpusCover := mgr.stats.corpusCover.get()
 			corpusSignal := mgr.stats.corpusSignal.get()
@@ -268,8 +265,8 @@ func RunManager(cfg *mgrconfig.Config) {
 			numReproducing := atomic.LoadUint32(&mgr.numReproducing)
 			numFuzzing := atomic.LoadUint32(&mgr.numFuzzing)
 
-			log.Logf(0, "VMs %v, executed %v, schedCollided %v, cost per exec (ms) %.2f, cover %v, signal %v/%v, crashes %v, repro %v, triageQLen %v",
-				numFuzzing, executed, schedCollided, costPerExec, corpusCover, corpusSignal, maxSignal, crashes, numReproducing, triageQLen)
+			log.Logf(0, "VMs %v, executed %v, schedCollided %v, cover %v, signal %v/%v, crashes %v, repro %v, triageQLen %v",
+				numFuzzing, executed, schedCollided, corpusCover, corpusSignal, maxSignal, crashes, numReproducing, triageQLen)
 		}
 	}()
 
@@ -879,7 +876,7 @@ func (mgr *Manager) runInstanceInner(index int, instanceName string) (*report.Re
 	}
 	cmd := instance.FuzzerCmd(args)
 	if schedulerBin != "" {
-		cmd = fmt.Sprintf("%v && %v", schedulerBin, cmd)
+		cmd = fmt.Sprintf("%v & %v", schedulerBin, cmd)
 	}
 	outc, errc, err := inst.Run(mgr.cfg.Timeouts.VMRunningTime, mgr.vmStop, cmd)
 	if err != nil {
