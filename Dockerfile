@@ -1,6 +1,5 @@
 # To avoid compatibility issues, align debian version with version produced by syzkaller/tools/create_image.sh
 FROM debian:bullseye-slim
-ARG KERNEL_DIR="v6.13-rc4"
 RUN apt update -y
 RUN apt install build-essential -y
 RUN apt install libelf-dev python3 -y
@@ -50,15 +49,3 @@ COPY ./instrumentation /sect/instrumentation
 WORKDIR /sect/instrumentation
 
 RUN cmake -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Debug -B build; cd build; make
-
-RUN mkdir /sect/$KERNEL_DIR
-WORKDIR /sect/$KERNEL_DIR
-
-WORKDIR /
-# RUN git clone https://github.com/udhos/update-golang.git
-# WORKDIR /update-golang
-# RUN RELEASE=1.19 ./update-golang.sh
-# RUN /etc/profile.d/golang_path.sh
-# RUN go version
-
-

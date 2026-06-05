@@ -7,8 +7,8 @@ SYZ_DIR=$(pwd)/syzkaller
 
 ADD_DIR=$(pwd)/to_copy_into_vm
 
-docker run -v $LINUX_DIR:/sect/$KERNEL_VERSION sect-kernel-compiler-image bash -c "cd /sect/$KERNEL_VERSION/tools/sched_ext; make"
-docker run -v $SYZ_DIR:/sect/syzkaller -e GOFLAGS=-buildvcs=false sect-kernel-compiler-image bash -c "git config --global --add safe.directory /sect/syzkaller && cd /sect/syzkaller && make generate && make TARGETOS=linux TARGETARCH=amd64"
+docker run -v $LINUX_DIR:/sect/$KERNEL_VERSION sect-kernel-compiler-image bash -c "cd /sect/$KERNEL_VERSION/tools/sched_ext && make"
+docker run -v $(pwd):/sect/mnt sect-kernel-compiler-image bash -c "git config --global --add safe.directory /sect/mnt/syzkaller && cd /sect/mnt/syzkaller && make"
 
 cp syzkaller/bin/linux_amd64/* $ADD_DIR
 
