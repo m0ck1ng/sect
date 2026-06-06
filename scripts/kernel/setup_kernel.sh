@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PASS_PATH=$(pwd)/instrumentation/build/libInjectSchedPoint.so
+PASS_PATH="${PASS_PATH:-$(pwd)/instrumentation/build/libInjectSchedPoint.so}"
 
 TAG="${1:-HEAD}"
 if [ $TAG = "HEAD" ]; then
