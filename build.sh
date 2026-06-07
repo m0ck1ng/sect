@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-KERNEL_VERSION="v6.18.23"
-DEBIAN_VERSION="bullseye"
+KERNEL_VERSION="v6.18"
+DEBIAN_VERSION="bookworm"
 
 LINUX_DIR=$(pwd)/$KERNEL_VERSION
 

@@ -1,5 +1,5 @@
 # To avoid compatibility issues, align debian version with version produced by syzkaller/tools/create_image.sh
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 RUN apt update -y
 RUN apt install build-essential -y
 RUN apt install libelf-dev python3 -y
@@ -49,3 +49,5 @@ COPY ./instrumentation /sect/instrumentation
 WORKDIR /sect/instrumentation
 
 RUN cmake -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Debug -B build; cd build; make
+
+RUN apt install -y libssl-dev
