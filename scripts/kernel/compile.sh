@@ -1,7 +1,5 @@
 #!/bin/bash
-set -e
-
-apt install -y \
+sudo apt install -y \
   build-essential \
   bc \
   flex \
@@ -9,13 +7,14 @@ apt install -y \
   libssl-dev \
   libelf-dev \
   libncurses-dev \
+  dwarves \
+  pahole \
   libudev-dev \
   libpci-dev \
   libiberty-dev \
   python3 \
   rsync \
   zstd
-
 
 
 # note clang must be installed manually

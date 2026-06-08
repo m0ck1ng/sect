@@ -1,4 +1,1 @@
 linux-*
-*.id_rsa
-*.id_rsa.pub
-to_copy_into_vm
