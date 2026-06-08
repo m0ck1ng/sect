@@ -17,7 +17,7 @@ fi
 
 # Variables affected by options
 ARCH=$(uname -m)
-RELEASE=bullseye
+RELEASE=bookworm
 FEATURE=minimal
 SEEK=2047
 PERF=false
