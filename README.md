@@ -59,71 +59,7 @@ All others will be run inside of a docker container via a mounted volume to avoi
 To run SECT, simply do:
 
 ```bash
-<<<<<<< HEAD
-./scripts/kernel/setup_kernel.sh $VERSION
-```
-
-This patches the kernel source with the instrumentation pass and copies the SCX scheduler into `tools/sched_ext/`.
-
-### 3. Compile the instrumented kernel
-
-```bash
-cd v6.18.23
-./compile.sh   # adjust -j flag as needed
-```
-
-### 4. Create a disk image
-
-```bash
-syzkaller/tools/create-image.sh
-```
-
-### 5. Configure and run syzkaller
-
-```bash
-cp configs/syzkaller.cfg.example configs/syzkaller.cfg
-```
-
-Edit `configs/syzkaller.cfg` and update `kernel_obj`, `image`, `sshkey`, `syzkaller`, and `vm.kernel` to match your environment.
-
-The **`scheduler_bin`** field is a SECT-specific extension — set it to the path of the compiled `scx_serialise` binary. syzkaller will deploy and load the scheduler in every VM before fuzzing begins.
-
-```bash
-syz-manager -config configs/syzkaller.cfg
-||||||| parent of cd1e719 (update README)
-./scripts/kernel/setup_kernel.sh $VERSION
-```
-
-This patches the kernel source with the instrumentation pass and copies the SCX scheduler into `tools/sched_ext/`.
-
-### 3. Compile the instrumented kernel
-
-```bash
-cd v6.13-rc4
-./compile.sh   # adjust -j flag as needed
-```
-
-### 4. Create a disk image
-
-```bash
-syzkaller/tools/create-image.sh
-```
-
-### 5. Configure and run syzkaller
-
-```bash
-cp configs/syzkaller.cfg.example configs/syzkaller.cfg
-```
-
-Edit `configs/syzkaller.cfg` and update `kernel_obj`, `image`, `sshkey`, `syzkaller`, and `vm.kernel` to match your environment.
-
-The **`scheduler_bin`** field is a SECT-specific extension — set it to the path of the compiled `scx_serialise` binary. syzkaller will deploy and load the scheduler in every VM before fuzzing begins.
-
-```bash
-syz-manager -config configs/syzkaller.cfg
-=======
 syz-manager -config configs/syzkaller.cfg.example
->>>>>>> cd1e719 (update README)
 ```
 
 Dashboard available at `http://0.0.0.0:56741`.
