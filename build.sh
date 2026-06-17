@@ -20,7 +20,8 @@ if [ ! -f "$DEBIAN_VERSION.img" ]; then
 fi
 
 docker run -v $LINUX_DIR:/sect/$KERNEL_VERSION sect-kernel-compiler-image bash -c "cd /sect/$KERNEL_VERSION/tools/sched_ext && make"
-docker run -v $(pwd):/sect/mnt sect-kernel-compiler-image bash -c "git config --global --add safe.directory /sect/mnt/syzkaller && cd /sect/mnt/syzkaller && make"
+docker run -v $(pwd):/sect/mnt sect-kernel-compiler-image bash -c "git config --global --add safe.directory /sect/mnt && cd /sect/mnt/syzkaller && make"
+
 
 sed -i "s|IMAGE_PATH|./${DEBIAN_VERSION}.img|g" configs/syzkaller.cfg.example
 sed -i "s|IMAGE_KEY_PATH|./${DEBIAN_VERSION}.id_rsa|g" configs/syzkaller.cfg.example
