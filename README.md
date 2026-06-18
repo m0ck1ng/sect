@@ -59,7 +59,7 @@ All others will be run inside of a docker container via a mounted volume to avoi
 To run SECT, simply do:
 
 ```bash
-syz-manager -config configs/syzkaller.cfg.example
+./syzkaller/bin/syz-manager -config configs/syzkaller.cfg.example
 ```
 
 Dashboard available at `http://0.0.0.0:56741`.
