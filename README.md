@@ -27,7 +27,7 @@ See [`instrumentation/README.md`](instrumentation/README.md) for LLVM pass build
 - Docker
 - debootsrap (installed via `apt` by `./build.sh`)
 - QEMU with KVM support (installed via `apt` by `./build.sh`)
-
+- git
 
 If you want to build SECT outside of the docker environment, you will need:
 - Clang/LLVM 16 (`clang-16`, `ld.lld-16`, `llvm-ar-16`, etc.) -- for the SECT LLVM instrumentation pass
