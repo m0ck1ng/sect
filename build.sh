@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+APPLY_BENCH_PATCH=1
 KERNEL_VERSION="v6.13-rc4"
 DEBIAN_VERSION="bullseye"
 
@@ -12,6 +13,11 @@ if [ ! -d "$KERNEL_VERSION" ]; then
 	PASS_PATH=/sect/instrumentation/build/libInjectSchedPoint.so ./scripts/kernel/setup_kernel.sh $KERNEL_VERSION
 fi
 
+if [ ! -z $APPLY_BENCH_PATCH ]; then
+	cd $KERNEL_VERSION; git apply ../benchmarks/benchmarks.patch; cd ..
+fi
+exit 0
+
 docker build -t sect-kernel-compiler-image .
 docker run -v $(pwd)/$KERNEL_VERSION:/sect/$KERNEL_VERSION -w /sect/$KERNEL_VERSION sect-kernel-compiler-image ./compile.sh
 
@@ -20,7 +26,8 @@ if [ ! -f "$DEBIAN_VERSION.img" ]; then
 fi
 
 docker run -v $LINUX_DIR:/sect/$KERNEL_VERSION sect-kernel-compiler-image bash -c "cd /sect/$KERNEL_VERSION/tools/sched_ext && make"
-docker run -v $(pwd):/sect/mnt sect-kernel-compiler-image bash -c "git config --global --add safe.directory /sect/mnt/syzkaller && cd /sect/mnt/syzkaller && make"
+docker run -v $(pwd):/sect/mnt sect-kernel-compiler-image bash -c "git config --global --add safe.directory /sect/mnt && cd /sect/mnt/syzkaller && make"
+
 
 sed -i "s|IMAGE_PATH|./${DEBIAN_VERSION}.img|g" configs/syzkaller.cfg.example
 sed -i "s|IMAGE_KEY_PATH|./${DEBIAN_VERSION}.id_rsa|g" configs/syzkaller.cfg.example

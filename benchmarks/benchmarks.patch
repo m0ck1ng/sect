@@ -1,0 +1,409 @@
+diff --git a/drivers/bluetooth/hci_ldisc.c b/drivers/bluetooth/hci_ldisc.c
+index d2d6ba8d2f8b..b6d808b08aca 100644
+--- a/drivers/bluetooth/hci_ldisc.c
++++ b/drivers/bluetooth/hci_ldisc.c
+@@ -767,8 +767,7 @@ static int hci_uart_tty_ioctl(struct tty_struct *tty, unsigned int cmd,
+ 		break;
+ 
+ 	case HCIUARTGETPROTO:
+-		if (test_bit(HCI_UART_PROTO_SET, &hu->flags) &&
+-		    test_bit(HCI_UART_PROTO_READY, &hu->flags))
++		if (test_bit(HCI_UART_PROTO_SET, &hu->flags))
+ 			err = hu->proto->id;
+ 		else
+ 			err = -EUNATCH;
+diff --git a/drivers/net/tun.c b/drivers/net/tun.c
+index e816aaba8e5f..8b39746ebe7e 100644
+--- a/drivers/net/tun.c
++++ b/drivers/net/tun.c
+@@ -739,7 +739,6 @@ static void tun_detach_all(struct net_device *dev)
+ 		sock_put(&tfile->sk);
+ 	}
+ 	list_for_each_entry_safe(tfile, tmp, &tun->disabled, next) {
+-		tun_napi_del(tfile);
+ 		tun_enable_queue(tfile);
+ 		tun_queue_purge(tfile);
+ 		xdp_rxq_info_unreg(&tfile->xdp_rxq);
+diff --git a/fs/btrfs/qgroup.c b/fs/btrfs/qgroup.c
+index a6f92836c9b1..9bc4cd09f420 100644
+--- a/fs/btrfs/qgroup.c
++++ b/fs/btrfs/qgroup.c
+@@ -3166,6 +3166,8 @@ int btrfs_qgroup_check_inherit(struct btrfs_fs_info *fs_info,
+ 			       struct btrfs_qgroup_inherit *inherit,
+ 			       size_t size)
+ {
++	if (!btrfs_qgroup_enabled(fs_info))
++		return 0;
+ 	if (inherit->flags & ~BTRFS_QGROUP_INHERIT_FLAGS_SUPP)
+ 		return -EOPNOTSUPP;
+ 	if (size < sizeof(*inherit) || size > PAGE_SIZE)
+@@ -3186,14 +3188,6 @@ int btrfs_qgroup_check_inherit(struct btrfs_fs_info *fs_info,
+ 	if (size != struct_size(inherit, qgroups, inherit->num_qgroups))
+ 		return -EINVAL;
+ 
+-	/*
+-	 * Skip the inherit source qgroups check if qgroup is not enabled.
+-	 * Qgroup can still be later enabled causing problems, but in that case
+-	 * btrfs_qgroup_inherit() would just ignore those invalid ones.
+-	 */
+-	if (!btrfs_qgroup_enabled(fs_info))
+-		return 0;
+-
+ 	/*
+ 	 * Now check all the remaining qgroups, they should all:
+ 	 *
+diff --git a/fs/f2fs/extent_cache.c b/fs/f2fs/extent_cache.c
+index 347b3b647834..d70ee41ff562 100644
+--- a/fs/f2fs/extent_cache.c
++++ b/fs/f2fs/extent_cache.c
+@@ -19,24 +19,36 @@
+ #include "node.h"
+ #include <trace/events/f2fs.h>
+ 
+-bool sanity_check_extent_cache(struct inode *inode, struct page *ipage)
++bool sanity_check_extent_cache(struct inode *inode)
+ {
+ 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+-	struct f2fs_extent *i_ext = &F2FS_INODE(ipage)->i_ext;
+-	struct extent_info ei;
++	struct f2fs_inode_info *fi = F2FS_I(inode);
++	struct extent_tree *et = fi->extent_tree[EX_READ];
++	struct extent_info *ei;
++
++	if (!et)
++		return true;
++
++	ei = &et->largest;
++	if (!ei->len)
++		return true;
++	
+ 	int devi;
+ 
+-	get_read_extent_info(&ei, i_ext);
++	/* Let's drop, if checkpoint got corrupted. */
++	if (is_set_ckpt_flags(sbi, CP_ERROR_FLAG)) {
++		ei->len = 0;
++		et->largest_updated = true;
+ 
+-	if (!ei.len)
+ 		return true;
++	}
+ 
+-	if (!f2fs_is_valid_blkaddr(sbi, ei.blk, DATA_GENERIC_ENHANCE) ||
+-	    !f2fs_is_valid_blkaddr(sbi, ei.blk + ei.len - 1,
++	if (!f2fs_is_valid_blkaddr(sbi, ei->blk, DATA_GENERIC_ENHANCE) ||
++	    !f2fs_is_valid_blkaddr(sbi, ei->blk + ei->len - 1,
+ 					DATA_GENERIC_ENHANCE)) {
+ 		f2fs_warn(sbi, "%s: inode (ino=%lx) extent info [%u, %u, %u] is incorrect, run fsck to fix",
+ 			  __func__, inode->i_ino,
+-			  ei.blk, ei.fofs, ei.len);
++			  ei->blk, ei->fofs, ei->len);
+ 		return false;
+ 	}
+ 
+@@ -44,8 +56,8 @@ bool sanity_check_extent_cache(struct inode *inode, struct page *ipage)
+ 		return true;
+ 
+ 	for (devi = 0; devi < sbi->s_ndevs; devi++) {
+-		if (FDEV(devi).start_blk != ei.blk ||
+-				FDEV(devi).end_blk != ei.blk + ei.len - 1)
++		if (FDEV(devi).start_blk != ei->blk ||
++				FDEV(devi).end_blk != ei->blk + ei->len - 1)
+ 			continue;
+ 
+ 		if (devi == 0) {
+@@ -59,7 +71,7 @@ bool sanity_check_extent_cache(struct inode *inode, struct page *ipage)
+ 			f2fs_warn(sbi,
+ 			    "%s: device alias inode (ino=%lx)'s extent info "
+ 			    "[%u, %u, %u] maps to zoned block device",
+-			    __func__, inode->i_ino, ei.blk, ei.fofs, ei.len);
++			    __func__, inode->i_ino, ei->blk, ei->fofs, ei->len);
+ 			return false;
+ 		}
+ 		return true;
+@@ -67,7 +79,7 @@ bool sanity_check_extent_cache(struct inode *inode, struct page *ipage)
+ 
+ 	f2fs_warn(sbi, "%s: device alias inode (ino=%lx)'s extent info "
+ 			"[%u, %u, %u] is inconsistent w/ any devices",
+-			__func__, inode->i_ino, ei.blk, ei.fofs, ei.len);
++			__func__, inode->i_ino, ei->blk, ei->fofs, ei->len);
+ 	return false;
+ }
+ 
+@@ -418,26 +430,28 @@ void f2fs_init_read_extent_tree(struct inode *inode, struct page *ipage)
+ 
+ 	if (!__may_extent_tree(inode, EX_READ)) {
+ 		/* drop largest read extent */
+-		if (i_ext->len) {
++		if (i_ext && i_ext->len) {
+ 			f2fs_wait_on_page_writeback(ipage, NODE, true, true);
+ 			i_ext->len = 0;
+ 			set_page_dirty(ipage);
+ 		}
+-		set_inode_flag(inode, FI_NO_EXTENT);
+-		return;
++		goto out;
+ 	}
+ 
+ 	et = __grab_extent_tree(inode, EX_READ);
+ 
++	if (!i_ext || !i_ext->len)
++		goto out;
++
+ 	get_read_extent_info(&ei, i_ext);
+ 
+ 	write_lock(&et->lock);
+-	if (atomic_read(&et->node_cnt) || !ei.len)
+-		goto skip;
++	if (atomic_read(&et->node_cnt))
++		goto unlock_out;
+ 
+ 	if (IS_DEVICE_ALIASING(inode)) {
+ 		et->largest = ei;
+-		goto skip;
++		goto unlock_out;
+ 	}
+ 
+ 	en = __attach_extent_node(sbi, et, &ei, NULL,
+@@ -450,13 +464,11 @@ void f2fs_init_read_extent_tree(struct inode *inode, struct page *ipage)
+ 		list_add_tail(&en->list, &eti->extent_list);
+ 		spin_unlock(&eti->extent_lock);
+ 	}
+-skip:
+-	/* Let's drop, if checkpoint got corrupted. */
+-	if (f2fs_cp_error(sbi)) {
+-		et->largest.len = 0;
+-		et->largest_updated = true;
+-	}
++unlock_out:
+ 	write_unlock(&et->lock);
++out:
++	if (!F2FS_I(inode)->extent_tree[EX_READ])
++		set_inode_flag(inode, FI_NO_EXTENT);
+ }
+ 
+ void f2fs_init_age_extent_tree(struct inode *inode)
+diff --git a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+index 6f2cbf4c5740..7c516ea5bb2c 100644
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@ -4247,7 +4247,7 @@ void f2fs_leave_shrinker(struct f2fs_sb_info *sbi);
+ /*
+  * extent_cache.c
+  */
+-bool sanity_check_extent_cache(struct inode *inode, struct page *ipage);
++bool sanity_check_extent_cache(struct inode *inode);
+ void f2fs_init_extent_tree(struct inode *inode);
+ void f2fs_drop_extent_tree(struct inode *inode);
+ void f2fs_destroy_extent_node(struct inode *inode);
+diff --git a/fs/f2fs/inode.c b/fs/f2fs/inode.c
+index 282fd320bdb3..0d39a3536b2c 100644
+--- a/fs/f2fs/inode.c
++++ b/fs/f2fs/inode.c
+@@ -525,16 +525,16 @@ static int do_read_inode(struct inode *inode)
+ 
+ 	init_idisk_time(inode);
+ 
+-	if (!sanity_check_extent_cache(inode, node_page)) {
++	/* Need all the flag bits */
++	f2fs_init_read_extent_tree(inode, node_page);
++	f2fs_init_age_extent_tree(inode);
++
++	if (!sanity_check_extent_cache(inode)) {
+ 		f2fs_put_page(node_page, 1);
+ 		f2fs_handle_error(sbi, ERROR_CORRUPTED_INODE);
+ 		return -EFSCORRUPTED;
+ 	}
+ 
+-	/* Need all the flag bits */
+-	f2fs_init_read_extent_tree(inode, node_page);
+-	f2fs_init_age_extent_tree(inode);
+-
+ 	f2fs_put_page(node_page, 1);
+ 
+ 	stat_inc_inline_xattr(inode);
+diff --git a/fs/inode.c b/fs/inode.c
+index 6b4c77268fc0..15f79e28eb1d 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -868,10 +868,6 @@ void evict_inodes(struct super_block *sb)
+ 			continue;
+ 
+ 		spin_lock(&inode->i_lock);
+-		if (atomic_read(&inode->i_count)) {
+-			spin_unlock(&inode->i_lock);
+-			continue;
+-		}
+ 		if (inode->i_state & (I_NEW | I_FREEING | I_WILL_FREE)) {
+ 			spin_unlock(&inode->i_lock);
+ 			continue;
+diff --git a/fs/jfs/jfs_discard.c b/fs/jfs/jfs_discard.c
+index 5f4b305030ad..009bd8b6ba3f 100644
+--- a/fs/jfs/jfs_discard.c
++++ b/fs/jfs/jfs_discard.c
+@@ -65,7 +65,7 @@ void jfs_issue_discard(struct inode *ip, u64 blkno, u64 nblocks)
+ int jfs_ioc_trim(struct inode *ip, struct fstrim_range *range)
+ {
+ 	struct inode *ipbmap = JFS_SBI(ip->i_sb)->ipbmap;
+-	struct bmap *bmp;
++	struct bmap *bmp = JFS_SBI(ip->i_sb)->bmap;
+ 	struct super_block *sb = ipbmap->i_sb;
+ 	int agno, agno_end;
+ 	u64 start, end, minlen;
+@@ -83,15 +83,11 @@ int jfs_ioc_trim(struct inode *ip, struct fstrim_range *range)
+ 	if (minlen == 0)
+ 		minlen = 1;
+ 
+-	down_read(&sb->s_umount);
+-	bmp = JFS_SBI(ip->i_sb)->bmap;
+-
+ 	if (minlen > bmp->db_agsize ||
+ 	    start >= bmp->db_mapsize ||
+-	    range->len < sb->s_blocksize) {
+-		up_read(&sb->s_umount);
++	    range->len < sb->s_blocksize)
+ 		return -EINVAL;
+-	}
++
+ 
+ 	if (end >= bmp->db_mapsize)
+ 		end = bmp->db_mapsize - 1;
+@@ -106,7 +102,6 @@ int jfs_ioc_trim(struct inode *ip, struct fstrim_range *range)
+ 		agno++;
+ 	}
+ 
+-	up_read(&sb->s_umount);
+ 	range->len = trimmed << sb->s_blocksize_bits;
+ 
+ 	return 0;
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 23e81c2a1e3f..dd7e3cfa01a4 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -4655,9 +4655,9 @@ static int do_mount_setattr(struct path *path, struct mount_kattr *kattr)
+ 	unlock_mount_hash();
+ 
+ 	if (kattr->propagation) {
++		namespace_unlock();
+ 		if (err)
+ 			cleanup_group_ids(mnt, NULL);
+-		namespace_unlock();
+ 	}
+ 
+ 	return err;
+diff --git a/include/net/bluetooth/bluetooth.h b/include/net/bluetooth/bluetooth.h
+index 435250c72d56..514c2c8ae5da 100644
+--- a/include/net/bluetooth/bluetooth.h
++++ b/include/net/bluetooth/bluetooth.h
+@@ -404,7 +404,6 @@ int  bt_sock_register(int proto, const struct net_proto_family *ops);
+ void bt_sock_unregister(int proto);
+ void bt_sock_link(struct bt_sock_list *l, struct sock *s);
+ void bt_sock_unlink(struct bt_sock_list *l, struct sock *s);
+-bool bt_sock_linked(struct bt_sock_list *l, struct sock *s);
+ struct sock *bt_sock_alloc(struct net *net, struct socket *sock,
+ 			   struct proto *prot, int proto, gfp_t prio, int kern);
+ int  bt_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
+diff --git a/net/bluetooth/af_bluetooth.c b/net/bluetooth/af_bluetooth.c
+index 0b4d0a8bd361..e39fba5565c5 100644
+--- a/net/bluetooth/af_bluetooth.c
++++ b/net/bluetooth/af_bluetooth.c
+@@ -185,28 +185,6 @@ void bt_sock_unlink(struct bt_sock_list *l, struct sock *sk)
+ }
+ EXPORT_SYMBOL(bt_sock_unlink);
+ 
+-bool bt_sock_linked(struct bt_sock_list *l, struct sock *s)
+-{
+-	struct sock *sk;
+-
+-	if (!l || !s)
+-		return false;
+-
+-	read_lock(&l->lock);
+-
+-	sk_for_each(sk, &l->head) {
+-		if (s == sk) {
+-			read_unlock(&l->lock);
+-			return true;
+-		}
+-	}
+-
+-	read_unlock(&l->lock);
+-
+-	return false;
+-}
+-EXPORT_SYMBOL(bt_sock_linked);
+-
+ void bt_accept_enqueue(struct sock *parent, struct sock *sk, bool bh)
+ {
+ 	const struct cred *old_cred;
+diff --git a/net/bluetooth/iso.c b/net/bluetooth/iso.c
+index 43d0ebe11100..92828883fbe4 100644
+--- a/net/bluetooth/iso.c
++++ b/net/bluetooth/iso.c
+@@ -139,7 +139,7 @@ static struct iso_conn *iso_conn_hold_unless_zero(struct iso_conn *conn)
+ 
+ static struct sock *iso_sock_hold(struct iso_conn *conn)
+ {
+-	if (!conn || !bt_sock_linked(&iso_sk_list, conn->sk))
++	if (!conn)
+ 		return NULL;
+ 
+ 	sock_hold(conn->sk);
+diff --git a/net/bluetooth/sco.c b/net/bluetooth/sco.c
+index aa7bfe26cb40..1c4ed342ff57 100644
+--- a/net/bluetooth/sco.c
++++ b/net/bluetooth/sco.c
+@@ -120,16 +120,6 @@ static struct sco_conn *sco_conn_hold_unless_zero(struct sco_conn *conn)
+ 	return conn;
+ }
+ 
+-static struct sock *sco_sock_hold(struct sco_conn *conn)
+-{
+-	if (!conn || !bt_sock_linked(&sco_sk_list, conn->sk))
+-		return NULL;
+-
+-	sock_hold(conn->sk);
+-
+-	return conn->sk;
+-}
+-
+ static void sco_sock_timeout(struct work_struct *work)
+ {
+ 	struct sco_conn *conn = container_of(work, struct sco_conn,
+@@ -146,7 +136,9 @@ static void sco_sock_timeout(struct work_struct *work)
+ 		sco_conn_put(conn);
+ 		return;
+ 	}
+-	sk = sco_sock_hold(conn);
++	sk = conn->sk;
++	if (sk)
++		sock_hold(sk);
+ 	sco_conn_unlock(conn);
+ 	sco_conn_put(conn);
+ 
+@@ -255,7 +247,9 @@ static void sco_conn_del(struct hci_conn *hcon, int err)
+ 	BT_DBG("hcon %p conn %p, err %d", hcon, conn, err);
+ 
+ 	sco_conn_lock(conn);
+-	sk = sco_sock_hold(conn);
++	sk = conn->sk;
++	if (sk)
++		sock_hold(sk);
+ 	sco_conn_unlock(conn);
+ 	sco_conn_put(conn);
+ 
+diff --git a/net/netrom/af_netrom.c b/net/netrom/af_netrom.c
+index 6ee148f0e6d0..0759c522baf4 100644
+--- a/net/netrom/af_netrom.c
++++ b/net/netrom/af_netrom.c
+@@ -400,10 +400,6 @@ static int nr_listen(struct socket *sock, int backlog)
+ 	struct sock *sk = sock->sk;
+ 
+ 	lock_sock(sk);
+-	if (sock->state != SS_UNCONNECTED) {
+-		release_sock(sk);
+-		return -EINVAL;
+-	}
+ 
+ 	if (sk->sk_state != TCP_LISTEN) {
+ 		memset(&nr_sk(sk)->user_addr, 0, AX25_ADDR_LEN);

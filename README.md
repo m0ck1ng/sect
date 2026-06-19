@@ -59,7 +59,45 @@ All others will be run inside of a docker container via a mounted volume to avoi
 To run SECT, simply do:
 
 ```bash
-syz-manager -config configs/syzkaller.cfg.example
+./syzkaller/bin/syz-manager -config configs/syzkaller.cfg.example
 ```
 
 Dashboard available at `http://0.0.0.0:56741`.
+
+## Running Individual Programs
+
+To run the SECT scheduler outside of a fuzzing campaign for bug reproduction, first ensure that you have run `./build.sh` as described above.
+
+1. Next, you can stand up a VM running the target kernel with `./run_qemu.sh` (login is `root`)
+2. Then, copy all relevant files into the VM with `./copy.sh`
+3. Once the files have been copied, *in another terminal window* SSH into the guest with `ssh -p 10021 -i ./bullseye.id_rsa root@localhost`
+
+At this point, you should have two terminal windows open inside the VM
+
+4. In one window, run `./scx_serialise -r 2` to start the SECT scheduler with the random walk algorithm
+5. In the *other window* run `./syz-execprog -procs 2 -repeat 1000 ./benchmarks/CVE-2023-31083/repro.prog` to execute the CVE-2023-31083 program 1000 times
+6. After running a program, be sure to un-load the scheduler via Ctrl-C in the first window before running on another program
+
+These steps can be repeated with different Syzkaller programs and algorithms. 
+
+### Usage
+
+```
+Usage: scx_serialise [-n NUM_THREADS] [-d DEPTH] [-r ALGO]
+
+  -n NUM   Threads expected in each syz-executor cycle (default: 2).
+  -d DEPTH PCT search depth (default: 3).
+  -r ALGO  Scheduling algorithm:
+             1 = Random Priority
+             2 = Random Walk
+             3 = PCT (default)
+             4 = POS
+  -h       Display this help and exit.
+```
+
+## Benchmark
+
+The benchmark used in the evaluation of the paper is represented as a single patch file which can be applied to `v6.13-rc4` of the Linux kernel.
+
+This patch is *already applied by default* by the build.sh script.
+Application of this patch can be disabled by editing the corresponding environment variable to `APPLY_BENCH_PATCH=0`
