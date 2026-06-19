@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+APPLY_BENCH_PATCH=1
 KERNEL_VERSION="v6.13-rc4"
 DEBIAN_VERSION="bullseye"
 
@@ -10,6 +11,10 @@ sudo apt install -y debootstrap qemu-system
 
 if [ ! -d "$KERNEL_VERSION" ]; then
 	PASS_PATH=/sect/instrumentation/build/libInjectSchedPoint.so ./scripts/kernel/setup_kernel.sh $KERNEL_VERSION
+fi
+
+if [ ! -z $APPLY_BENCH_PATCH ]; then
+	cd $KERNEL_VERSION; git apply ../benchmarks/benchmark.patch; cd ..
 fi
 
 docker build -t sect-kernel-compiler-image .
