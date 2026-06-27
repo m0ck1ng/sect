@@ -16,7 +16,6 @@ fi
 if [ ! -z $APPLY_BENCH_PATCH ]; then
 	cd $KERNEL_VERSION; git apply ../benchmarks/benchmarks.patch; cd ..
 fi
-exit 0
 
 docker build -t sect-kernel-compiler-image .
 docker run -v $(pwd)/$KERNEL_VERSION:/sect/$KERNEL_VERSION -w /sect/$KERNEL_VERSION sect-kernel-compiler-image ./compile.sh
